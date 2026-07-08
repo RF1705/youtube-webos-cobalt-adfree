@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches:
-      - cobalt
       - main
   pull_request:
   workflow_dispatch:
@@ -21,6 +20,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq git patch sed binutils squashfs-tools rename findutils xz-utils make
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
       - name: Check Makefile
         run: make help
 
@@ -31,10 +37,8 @@ jobs:
           test -d cobalt-patches
           test -d webapp
 
-      - name: Check no old youtube-webos app folder exists
+      - name: Build injected web app
+        working-directory: webapp
         run: |
-          test ! -d youtube-webos
-
-      - name: Search old project references
-        run: |
-          ! grep -RIn "GuillaumeSmaha/youtube-webos-cobalt\|FriedChickenButt/youtube-webos\|cd youtube-webos\|webosbrew/youtube-webos" . --exclude-dir=.git
+          npm ci
+          npm run build -- --env production --optimization-minimize

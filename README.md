@@ -1,5 +1,9 @@
 # YouTube webOS Cobalt AdFree
 
+[![CI](https://github.com/RF1705/youtube-webos-cobalt-adfree/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RF1705/youtube-webos-cobalt-adfree/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/RF1705/youtube-webos-cobalt-adfree?label=latest%20release)](https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/RF1705/youtube-webos-cobalt-adfree/total?label=downloads)](https://github.com/RF1705/youtube-webos-cobalt-adfree/releases)
+
 Unofficial Cobalt-based YouTube app modification for LG webOS TVs with ad blocking and SponsorBlock support.
 
 This project patches the webOS YouTube application by replacing or modifying the Cobalt runtime used by YouTube TV on webOS. The goal is to keep the original YouTube TV experience while adding ad blocking, SponsorBlock support and related improvements.
