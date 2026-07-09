@@ -53,7 +53,7 @@ Download a release `.ipk` package and install it using one of the following meth
 Recommended release package:
 
 ```text
-com.cobalt.youtube.adfree_1.1.7_arm.ipk
+com.cobalt.youtube.adfree_1.0.0_arm.ipk
 ```
 
 ### Install via webOS Device Manager
@@ -74,14 +74,14 @@ the webOS app install service:
 ```sh
 mkdir -p /media/developer/temp
 cd /media/developer/temp
-wget https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.0.0/com.cobalt.youtube.adfree_1.1.7_arm.ipk
-luna-send-pub -i 'luna://com.webos.appInstallService/dev/install' '{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/com.cobalt.youtube.adfree_1.1.7_arm.ipk","subscribe":true}'
+wget https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.0.0/com.cobalt.youtube.adfree_1.0.0_arm.ipk
+luna-send-pub -i 'luna://com.webos.appInstallService/dev/install' '{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/com.cobalt.youtube.adfree_1.0.0_arm.ipk","subscribe":true}'
 ```
 
 After installation, the downloaded package can be removed:
 
 ```sh
-rm /media/developer/temp/com.cobalt.youtube.adfree_1.1.7_arm.ipk
+rm /media/developer/temp/com.cobalt.youtube.adfree_1.0.0_arm.ipk
 ```
 
 ## Patch an official YouTube IPK
