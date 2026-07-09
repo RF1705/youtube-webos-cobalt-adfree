@@ -138,27 +138,58 @@ function findDescriptionPanel() {
     );
 }
 
-function findDislikeLabel(button) {
-    const labelPattern =
-        /^(mag ich nicht|gefällt mir nicht|gefaellt mir nicht|dislike|thumbs down|\d+(?:[,.]\d+)?[km]?)$/i;
+const DISLIKE_LABEL_PATTERN =
+    /^(mag ich nicht|gefällt mir nicht|gefaellt mir nicht|dislike|thumbs down|\d+(?:[,.]\d+)?[km]?)$/i;
+
+function compactText(value) {
+    return (value || '').replace(/\s+/g, ' ').trim();
+}
+
+function isVisualTextElement(element) {
+    if (!element || !element.tagName) return false;
+    const tagName = element.tagName.toLowerCase();
+    if (['svg', 'path', 'use', 'img', 'canvas'].includes(tagName)) return false;
+    if (element.querySelector?.('svg, path, use, img, canvas')) return false;
+    return true;
+}
+
+function markDislikeLabel(element) {
+    if (!element) return null;
+    element.setAttribute('data-ytaf-ryd-label', 'true');
+    return element;
+}
+
+function findRememberedDislikeLabel(button) {
+    const remembered = button.querySelector('[data-ytaf-ryd-label="true"]');
+    if (remembered && isVisualTextElement(remembered)) return remembered;
+
+    const original = button.querySelector('[data-ytaf-ryd-original-label]');
+    if (original && isVisualTextElement(original)) return markDislikeLabel(original);
+
+    return null;
+}
+
+function findExistingDislikeLabel(button) {
+    const remembered = findRememberedDislikeLabel(button);
+    if (remembered) return remembered;
+
     const elements = Array.prototype.slice.call(button.querySelectorAll('*'));
 
     for (let i = 0; i < elements.length; i++) {
         const element = elements[i];
-        const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!text || !labelPattern.test(text)) continue;
+        const text = compactText(element.textContent);
+        if (!text || !DISLIKE_LABEL_PATTERN.test(text)) continue;
         if (element.children && element.children.length) continue;
-        element.setAttribute('data-ytaf-ryd-label', 'true');
-        return element;
+        if (!isVisualTextElement(element)) continue;
+        return markDislikeLabel(element);
     }
 
     const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT, null);
     let textNode = walker.nextNode();
     while (textNode) {
-        const text = (textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
-        if (labelPattern.test(text) && textNode.parentElement) {
-            textNode.parentElement.setAttribute('data-ytaf-ryd-label', 'true');
-            return textNode.parentElement;
+        const text = compactText(textNode.nodeValue);
+        if (DISLIKE_LABEL_PATTERN.test(text) && textNode.parentElement) {
+            return markDislikeLabel(textNode.parentElement);
         }
         textNode = walker.nextNode();
     }
@@ -166,42 +197,77 @@ function findDislikeLabel(button) {
     return null;
 }
 
-function overwriteDislikeLabels(button, text) {
-    const labelPattern =
-        /^(mag ich nicht|gefällt mir nicht|gefaellt mir nicht|dislike|thumbs down|\d+(?:[,.]\d+)?[km]?)$/i;
-    let changed = 0;
-
+function findEmptyDislikeLabelSlot(button) {
     const elements = Array.prototype.slice.call(button.querySelectorAll('*'));
-    for (let i = 0; i < elements.length; i++) {
-        const element = elements[i];
-        const current = (element.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!current || !labelPattern.test(current)) continue;
-        if (element.children && element.children.length) continue;
-        if (!element.getAttribute('data-ytaf-ryd-original-label')) {
-            element.setAttribute('data-ytaf-ryd-original-label', current);
+
+    return (
+        elements.find((element) => {
+            if (element.children && element.children.length) return false;
+            if (!isVisualTextElement(element)) return false;
+            const text = compactText(element.textContent);
+            if (text) return false;
+
+            const marker = [
+                element.id,
+                element.className,
+                element.getAttribute?.('idomkey'),
+                element.getAttribute?.('aria-label')
+            ]
+                .filter(Boolean)
+                .join(' ');
+
+            return /label|text|value|count/i.test(marker);
+        }) || null
+    );
+}
+
+function findDislikeLabel(button, allowEmptySlot = false) {
+    const existing = findExistingDislikeLabel(button);
+    if (existing) return existing;
+
+    if (allowEmptySlot) {
+        const emptySlot = findEmptyDislikeLabelSlot(button);
+        if (emptySlot) return markDislikeLabel(emptySlot);
+    }
+
+    return null;
+}
+
+function overwriteDislikeLabels(button, text) {
+    let changed = 0;
+    const target = findDislikeLabel(button, true);
+
+    if (target) {
+        const current = compactText(target.textContent);
+        if (!target.getAttribute('data-ytaf-ryd-original-label')) {
+            target.setAttribute('data-ytaf-ryd-original-label', current || 'Mag ich nicht');
         }
-        if (element.textContent !== text) {
-            element.textContent = text;
+        if (target.textContent !== text) {
+            target.textContent = text;
+            changed += 1;
         }
-        element.setAttribute('data-ytaf-ryd-label', 'true');
-        changed += 1;
+        markDislikeLabel(target);
     }
 
     const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT, null);
     let textNode = walker.nextNode();
     while (textNode) {
-        const current = (textNode.nodeValue || '').replace(/\s+/g, ' ').trim();
-        if (labelPattern.test(current) && textNode.nodeValue !== text) {
+        const current = compactText(textNode.nodeValue);
+        if (DISLIKE_LABEL_PATTERN.test(current) && textNode.nodeValue !== text) {
             textNode.nodeValue = text;
-            if (textNode.parentElement) {
-                textNode.parentElement.setAttribute('data-ytaf-ryd-label', 'true');
-            }
+            if (textNode.parentElement) markDislikeLabel(textNode.parentElement);
             changed += 1;
         }
         textNode = walker.nextNode();
     }
 
     button.setAttribute('count', text);
+    button.setAttribute('data-ytaf-ryd-count', text);
+    try {
+        button.count = text;
+    } catch (err) {
+        // Some custom elements expose read-only properties.
+    }
     return changed;
 }
 
@@ -210,6 +276,8 @@ function scheduleLabelOverwrite(handler) {
     setTimeout(() => handler.applyDislikeLabel(), 0);
     setTimeout(() => handler.applyDislikeLabel(), 40);
     setTimeout(() => handler.applyDislikeLabel(), 120);
+    setTimeout(() => handler.applyDislikeLabel(), 300);
+    setTimeout(() => handler.applyDislikeLabel(), 700);
     requestAnimationFrame(() => handler.applyDislikeLabel());
 }
 
@@ -529,7 +597,7 @@ class ReturnYouTubeDislikeProbe {
         const count = formatCount(this.dislikes);
         const dislikeCount = Number(this.dislikes);
 
-        let label = findDislikeLabel(this.dislikeButton);
+        let label = findDislikeLabel(this.dislikeButton, true);
         if (!label) {
             this.injectedText = 'label missing';
             return;
@@ -558,7 +626,7 @@ class ReturnYouTubeDislikeProbe {
         if (label.textContent !== count) {
             this.isUpdatingLabel = true;
             overwriteDislikeLabels(this.dislikeButton, count);
-            label = findDislikeLabel(this.dislikeButton) || label;
+            label = findDislikeLabel(this.dislikeButton, true) || label;
             this.isUpdatingLabel = false;
         }
         this.injectedText = count;
@@ -606,7 +674,7 @@ class ReturnYouTubeDislikeProbe {
         });
         this.dislikeButtonObserver.observe(button, {
             attributes: true,
-            attributeFilter: ['class', 'aria-pressed', 'aria-selected', 'selected', 'checked'],
+            attributeFilter: ['class', 'aria-label', 'aria-pressed', 'aria-selected', 'selected', 'checked', 'count'],
             childList: true,
             characterData: true,
             subtree: true
