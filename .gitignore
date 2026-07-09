@@ -1,7 +1,7 @@
 /dist
 /cobalt
 /workdir
-/workdir-install-adfree
+.npm
 /.env
 /.vscode
 *.pyc
@@ -11,3 +11,4 @@
 /webapp/output
 /cobalt-bin/*
 !/cobalt-bin/*.xz
+.DS_Store
