@@ -1,15 +1,19 @@
+console.info('[ytaf] adblock-main.js LOADING');
+
 import 'whatwg-fetch';
 import './domrect-polyfill';
-import './adblock.js';
-import './sponsorblock.js';
-import './returnyoutubedislike.js';
 import './ui.js';
 
 import { handleLaunch, waitForChildAdd } from './utils';
+import { configRead } from './config.js';
+import { userScriptStartUI } from './ui.js';
 import { userScriptStartAdBlock } from './adblock.js';
 import { userScriptStartSponsorBlock } from './sponsorblock.js';
 import { userScriptStartReturnYouTubeDislike } from './returnyoutubedislike.js';
-import { userScriptStartUI } from './ui.js';
+
+console.info('[ytaf] adblock-main.js LOADED, all imports successful');
+
+console.info('[ytaf] adblock-main.js LOADED, imports ready');
 
 document.addEventListener(
   'webOSRelaunch',
@@ -54,13 +58,54 @@ document.addEventListener(
   });
 })();
 
-export function startUserScript() {
-  userScriptStartAdBlock();
-  userScriptStartSponsorBlock();
-  userScriptStartReturnYouTubeDislike();
-  userScriptStartUI();
+function startOptionalHook(configKey, startHook) {
+  const enabled = configRead(configKey);
+  console.info(`[ytaf] hook-check ${configKey} =>`, enabled);
+
+  if (!enabled) {
+    console.info(`[ytaf] hook-skip ${configKey}`);
+    return;
+  }
+
+  try {
+    console.info(`[ytaf] hook-start ${configKey}`);
+    startHook();
+    console.info(`[ytaf] hook-started ${configKey}`);
+  } catch (err) {
+    console.warn(`[ytaf] hook-failed ${configKey}:`, err);
+  }
 }
 
-(function () {
-  startUserScript();
-})();
+export async function startUserScript() {
+  console.info('[ytaf] startUserScript begin');
+
+  try {
+    userScriptStartUI();
+    console.info('[ytaf] UI started');
+  } catch (err) {
+    console.warn('[ytaf] Failed to start UI:', err);
+  }
+
+  try {
+    startOptionalHook('enableAdBlock', userScriptStartAdBlock);
+    startOptionalHook('enableSponsorBlock', userScriptStartSponsorBlock);
+    startOptionalHook('enableReturnYouTubeDislike', userScriptStartReturnYouTubeDislike);
+    console.info('[ytaf] All hooks loaded successfully');
+  } catch (err) {
+    console.warn('[ytaf] Failed loading hooks:', err);
+  }
+}
+
+// Global error handlers to catch unhandled errors
+window.addEventListener('error', (event) => {
+  console.error('[ytaf] Global error:', event.error || event.message);
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('[ytaf] Unhandled promise rejection:', event.reason);
+});
+
+// Start the user script and catch any top-level errors
+startUserScript().catch((err) => {
+  console.error('[ytaf] startUserScript() error:', err);
+});
