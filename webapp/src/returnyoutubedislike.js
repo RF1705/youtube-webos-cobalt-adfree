@@ -15,13 +15,14 @@ const DESCRIPTION_SELECTORS = {
     cptLabel: '.Ph2lNb'
 };
 
+const BUTTON_RETRY_DELAYS = [0, 120, 300, 700, 1500, 3000, 6000];
+
 function getVideoIDFromLocation() {
     try {
         const candidates = [location.hash, location.search, location.href];
 
         for (const candidate of candidates) {
             if (!candidate) continue;
-
             const normalized = candidate.startsWith('#') ? candidate.substring(1) : candidate;
             const questionMarkIndex = normalized.indexOf('?');
             const query = questionMarkIndex >= 0 ? normalized.substring(questionMarkIndex) : normalized;
@@ -84,7 +85,8 @@ function findDislikeButton() {
 }
 
 function findDislikeLabel(button) {
-    return button ? button.querySelector('yt-formatted-string') : null;
+    if (!button) return null;
+    return button.querySelector('yt-formatted-string');
 }
 
 function setButtonDisplayState(button, state) {
@@ -100,7 +102,9 @@ function setButtonDisplayState(button, state) {
 }
 
 function clearCountSpan(label) {
-    const countSpan = label?.querySelector('.ytaf-ryd-count-span');
+    if (!label) return;
+
+    const countSpan = label.querySelector('.ytaf-ryd-count-span');
     if (countSpan?.parentElement) {
         countSpan.parentElement.removeChild(countSpan);
     }
@@ -133,20 +137,21 @@ function classNameFromSelector(selector) {
 }
 
 class ReturnYouTubeDislike {
-    active = false;
     videoID = null;
     dislikes = 'n/a';
     votesLoaded = false;
     dislikeButton = null;
     dislikeButtonObserver = null;
+    domObserver = null;
     globalActivateHandler = null;
+    retryTimers = [];
     refreshTimer = null;
+    domRefreshTimer = null;
     isUpdatingButton = false;
     optimisticDisliked = false;
     lastLocalToggleAt = 0;
 
     init(videoID) {
-        this.active = true;
         this.videoID = videoID;
         this.votesLoaded = false;
         this.dislikes = 'n/a';
@@ -156,7 +161,8 @@ class ReturnYouTubeDislike {
         document.addEventListener('click', this.globalActivateHandler, true);
 
         this.fetchVotes();
-        this.refresh();
+        this.observePageChanges();
+        this.scheduleInitialRefreshes();
     }
 
     fetchVotes() {
@@ -170,8 +176,6 @@ class ReturnYouTubeDislike {
             url,
             8000,
             (results) => {
-                if (!this.active) return;
-
                 this.votesLoaded = true;
                 this.dislikes = Number.isFinite(Number(results.dislikes))
                     ? Number(results.dislikes)
@@ -180,8 +184,6 @@ class ReturnYouTubeDislike {
                 this.scheduleRefresh(400);
             },
             () => {
-                if (!this.active) return;
-
                 this.votesLoaded = true;
                 this.dislikes = 'n/a';
                 this.refresh();
@@ -189,19 +191,45 @@ class ReturnYouTubeDislike {
         );
     }
 
-    scheduleRefresh(delay) {
-        if (!this.active) return;
+    scheduleInitialRefreshes() {
+        this.clearRetryTimers();
+        BUTTON_RETRY_DELAYS.forEach((delay) => {
+            this.retryTimers.push(setTimeout(() => this.refresh(), delay));
+        });
+    }
 
+    clearRetryTimers() {
+        this.retryTimers.forEach((timer) => clearTimeout(timer));
+        this.retryTimers = [];
+    }
+
+    scheduleRefresh(delay) {
         if (this.refreshTimer) clearTimeout(this.refreshTimer);
         this.refreshTimer = setTimeout(() => {
             this.refreshTimer = null;
-            if (this.active) this.refresh();
+            this.refresh();
         }, delay);
     }
 
-    refresh() {
-        if (!this.active) return;
+    observePageChanges() {
+        if (this.domObserver || !document.body) return;
 
+        this.domObserver = new MutationObserver(() => {
+            if (this.domRefreshTimer) return;
+
+            this.domRefreshTimer = setTimeout(() => {
+                this.domRefreshTimer = null;
+                this.refresh();
+            }, 250);
+        });
+
+        this.domObserver.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
+    }
+
+    refresh() {
         this.updateDislikeButton();
         this.updateDescriptionDislikes();
     }
@@ -265,7 +293,16 @@ class ReturnYouTubeDislike {
     }
 
     handleGlobalActivate(evt) {
-        if (!this.active) return;
+        const menuOpen = document.querySelector('.ytaf-ui-container')?.style?.display !== 'none';
+        const focusInsideMenu = menuOpen && (
+            document.activeElement === document.querySelector('.ytaf-ui-container') ||
+            document.querySelector('.ytaf-ui-container')?.contains(document.activeElement)
+        );
+
+        if (focusInsideMenu) {
+            // Let the custom UI handle Enter/Space while it's open on TV
+            return;
+        }
 
         if (evt.type === 'keydown') {
             const keyCode = evt.keyCode || evt.which;
@@ -286,10 +323,10 @@ class ReturnYouTubeDislike {
             }
         }
 
+        // The description panel is created after Enter/click. A delayed refresh is
+        // cheaper than observing the whole document permanently.
         this.scheduleRefresh(250);
-        setTimeout(() => {
-            if (this.active) this.refresh();
-        }, 900);
+        setTimeout(() => this.refresh(), 900);
     }
 
     handleDislikeToggle() {
@@ -333,7 +370,9 @@ class ReturnYouTubeDislike {
     }
 
     findDescriptionLikesElement(mode) {
-        return mode.container.querySelector(`div[idomkey="factoid-0"]${mode.factoidClass}`);
+        return mode.container.querySelector(
+            `div[idomkey="factoid-0"]${mode.factoidClass}, div[aria-label*="like"]${mode.factoidClass}, div[aria-label*="Like"]${mode.factoidClass}, div[aria-label*="Gefällt"]${mode.factoidClass}`
+        );
     }
 
     createDescriptionDislikeElement(likesElement, mode) {
@@ -361,7 +400,7 @@ class ReturnYouTubeDislike {
 
     updateDescriptionDislikes() {
         const dislikeCount = Number(this.dislikes);
-        if (!Number.isFinite(dislikeCount) || dislikeCount <= 0) return;
+        if (!Number.isFinite(dislikeCount)) return;
 
         const panel = findDescriptionPanel();
         if (!panel) return;
@@ -393,17 +432,27 @@ class ReturnYouTubeDislike {
     }
 
     destroy() {
-        this.active = false;
+        this.clearRetryTimers();
 
         if (this.refreshTimer) {
             clearTimeout(this.refreshTimer);
             this.refreshTimer = null;
         }
 
+        if (this.domRefreshTimer) {
+            clearTimeout(this.domRefreshTimer);
+            this.domRefreshTimer = null;
+        }
+
         if (this.globalActivateHandler) {
             document.removeEventListener('keydown', this.globalActivateHandler, true);
             document.removeEventListener('click', this.globalActivateHandler, true);
             this.globalActivateHandler = null;
+        }
+
+        if (this.domObserver) {
+            this.domObserver.disconnect();
+            this.domObserver = null;
         }
 
         if (this.dislikeButtonObserver) {
@@ -417,8 +466,6 @@ class ReturnYouTubeDislike {
         }
 
         if (this.dislikeButton) {
-            const label = findDislikeLabel(this.dislikeButton);
-            clearCountSpan(label);
             this.dislikeButton.classList.remove(
                 'ytaf-ryd-loading',
                 'ytaf-ryd-show-native',
@@ -432,9 +479,7 @@ class ReturnYouTubeDislike {
 
 function loadReturnYouTubeDislikeForCurrentVideo() {
     const videoID = getVideoIDFromLocation();
-    const enabled = configRead('enableReturnYouTubeDislike');
-
-    if (!videoID || !enabled) {
+    if (!videoID || !configRead('enableReturnYouTubeDislike')) {
         if (window.returnYoutubeDislike) {
             window.returnYoutubeDislike.destroy();
             window.returnYoutubeDislike = null;
