@@ -112,7 +112,70 @@ To overwrite the official YouTube app instead:
 make PACKAGE=./your-tv-youtube.ipk PACKAGE_NAME=youtube.leanback.v4
 ```
 
-The patched IPK will be created next to the original package.
+The patched IPK will be created in the `output/` directory.
+
+## Standalone Cobalt launcher
+
+The standalone launcher path builds an app that only starts Cobalt with the
+YouTube TV URL. It does not copy files from an official YouTube package.
+
+```sh
+make standalone-package
+```
+
+Default values:
+
+```text
+App ID: com.cobalt.youtube.launcher
+Name:   YouTube Cobalt
+URL:    https://www.youtube.com/tv?launch=menu
+Cobalt: Evergreen 7.1.2, arm-softfp, sbversion-18
+```
+
+This target needs a free Cobalt runtime directory containing:
+
+```text
+cobalt-bin/7.1.2-arm-softfp-sb18/cobalt
+cobalt-bin/7.1.2-arm-softfp-sb18/lib/libcobalt.lz4
+cobalt-bin/7.1.2-arm-softfp-sb18/content/
+```
+
+`libcobalt.lz4` and `content/` can come from the official Cobalt Evergreen
+release asset:
+
+```text
+cobalt_evergreen_7.1.2_arm-softfp_sbversion-18_release_compressed_20260627021609.crx
+```
+
+The release asset does not include the webOS app starter. Provide a
+webOS-compatible Cobalt starter from the matching `27.lts.1` source/port and
+copy it into the runtime directory as `cobalt`. Cobalt's Evergreen
+`loader_app` target may produce a shared object on Evergreen platforms; that is
+not by itself the executable webOS `main` file.
+
+The older patch archives usually only contain `libcobalt.so`, because they
+reuse the official YouTube app's Cobalt starter. In that case the standalone
+target stops with a clear error instead of falling back to official app files.
+
+The app id, title and URL can be changed:
+
+```sh
+make standalone-package \
+  STANDALONE_APP_ID=com.cobalt.youtube.launcher \
+  STANDALONE_DISPLAY_NAME="YouTube Cobalt" \
+  STANDALONE_YOUTUBE_URL="https://www.youtube.com/tv?launch=menu"
+```
+
+For a compatibility proof of concept that uses the extracted webOS starter with
+the matching `22.lts.6-12` runtime:
+
+```sh
+make standalone-poc-package
+```
+
+This still builds a separate app and does not patch the official YouTube app.
+The extracted starter is only a temporary compatibility bridge until a free
+webOS Cobalt starter is available.
 
 ## Autostart
 
@@ -193,6 +256,12 @@ This project is community maintained. YouTube TV, Cobalt and webOS can change at
 ## Credits
 
 This project builds on research and work from the webOS Homebrew, Cobalt and YouTube TV modification communities.
+
+Special thanks to these projects and maintainers whose work made this project possible:
+
+* [NicholasBly/youtube-webos](https://github.com/NicholasBly/youtube-webos)
+* [webosbrew/youtube-webos](https://github.com/webosbrew/youtube-webos)
+* [UltraHDR/youtube-webos-cobalt](https://github.com/UltraHDR/youtube-webos-cobalt)
 
 If this project helps you, you can support the maintainer here:
 
