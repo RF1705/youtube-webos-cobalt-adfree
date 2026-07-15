@@ -86,6 +86,7 @@ export function userScriptStartUI() {
   const uiContainer = document.createElement('div');
   uiContainer.classList.add('ytaf-ui-container');
   uiContainer.style.display = 'none';
+  uiContainer.style.visibility = 'hidden';
   uiContainer.setAttribute('tabindex', 0);
   uiContainer.addEventListener(
     'focus',
@@ -226,9 +227,44 @@ export function userScriptStartUI() {
   );
   uiContainer.appendChild(sponsorBlock);
 
-  document.querySelector('body').appendChild(uiContainer);
+  (document.body || document.documentElement).appendChild(uiContainer);
 
   let latestFocus = null;
+  let focusKeepAliveTimer = null;
+
+  function isContainerOpen() {
+    return uiContainer.style.display !== 'none' && uiContainer.style.visibility !== 'hidden';
+  }
+
+  function applyVisibleContainerStyles() {
+    Object.assign(uiContainer.style, {
+      position: 'fixed',
+      display: 'block',
+      visibility: 'visible',
+      opacity: '1',
+      left: '64px',
+      top: '64px',
+      right: 'auto',
+      bottom: 'auto',
+      width: '720px',
+      maxWidth: '80vw',
+      maxHeight: '80vh',
+      boxSizing: 'border-box',
+      overflow: 'auto',
+      zIndex: '2147483647',
+      pointerEvents: 'auto',
+      background: '#05080c',
+      color: '#ffffff',
+      border: '6px solid #37ff77',
+      borderRadius: '0',
+      padding: '24px',
+      fontSize: '22px',
+      lineHeight: '1.25',
+      transform: 'none',
+      animation: 'none',
+      boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)'
+    });
+  }
 
   function focusMenuItem(preferredTabIndex = lastTabIndex) {
     const focusableItems = Array.from(
@@ -258,20 +294,19 @@ export function userScriptStartUI() {
 
   function openContainer() {
     console.info('Container: Showing & Focusing!');
-    uiContainer.style.display = 'block';
+    applyVisibleContainerStyles();
     latestFocus =
       document.activeElement && document.activeElement !== document.body
         ? document.activeElement
         : null;
 
-    window.requestAnimationFrame(() => {
+    setTimeout(() => {
       focusMenuItem(1);
-    });
-    keepContainerFocus();
+    }, 0);
   }
 
   function keepContainerFocus() {
-    if (uiContainer.offsetParent !== null) {
+    if (isContainerOpen()) {
       const activeElement = document.activeElement;
       const hasFocusInside = Boolean(
         activeElement &&
@@ -284,7 +319,7 @@ export function userScriptStartUI() {
         focusMenuItem();
       }
 
-      setTimeout(keepContainerFocus, 120);
+      focusKeepAliveTimer = setTimeout(keepContainerFocus, 250);
     }
   }
 
@@ -296,7 +331,7 @@ export function userScriptStartUI() {
   }
 
   function captureMenuFocus() {
-    if (uiContainer.style.display === 'none' || menuHasFocus()) {
+    if (!isContainerOpen() || menuHasFocus()) {
       return;
     }
 
@@ -309,7 +344,13 @@ export function userScriptStartUI() {
 
   function closeContainer() {
     console.info('Container: Hiding!');
+    if (focusKeepAliveTimer) {
+      clearTimeout(focusKeepAliveTimer);
+      focusKeepAliveTimer = null;
+    }
     uiContainer.style.display = 'none';
+    uiContainer.style.visibility = 'hidden';
+    uiContainer.style.pointerEvents = 'none';
     uiContainer.blur();
     if (latestFocus != null) {
       latestFocus.focus();
@@ -317,7 +358,7 @@ export function userScriptStartUI() {
   }
 
   const eventHandler = (evt) => {
-    const menuOpen = uiContainer.style.display !== 'none';
+    const menuOpen = isContainerOpen();
     const focusInsideMenu = menuOpen && menuHasFocus();
 
     if (evt.type === 'keydown' && menuOpen) {
@@ -360,7 +401,7 @@ export function userScriptStartUI() {
         return false;
       }
 
-      if (evt.key === 'Escape' || evt.keyCode === 27) {
+      if (evt.key === 'Escape' || evt.keyCode === 27 || evt.keyCode === 461 || evt.keyCode === 8) {
         evt.preventDefault();
         evt.stopPropagation();
         closeContainer();
@@ -373,7 +414,7 @@ export function userScriptStartUI() {
       evt.preventDefault();
       evt.stopPropagation();
       if (evt.type === 'keydown') {
-        if (uiContainer.style.display === 'none') {
+        if (!isContainerOpen()) {
           openContainer();
         } else {
           closeContainer();
@@ -386,7 +427,7 @@ export function userScriptStartUI() {
       evt.keyCode == 187
     ) {
       // char '='
-      if (uiContainer.style.display === 'none') {
+      if (!isContainerOpen()) {
         openContainer();
         evt.preventDefault();
         evt.stopPropagation();

@@ -10,6 +10,7 @@ import { userScriptStartUI } from './ui.js';
 import { userScriptStartAdBlock } from './adblock.js';
 import { userScriptStartSponsorBlock } from './sponsorblock.js';
 import { userScriptStartReturnYouTubeDislike } from './returnyoutubedislike.js';
+import { userScriptStartDebugOverlay } from './debug-overlay.js';
 
 console.info('[ytaf] adblock-main.js LOADED, all imports successful');
 
@@ -81,6 +82,7 @@ export async function startUserScript() {
 
   try {
     userScriptStartUI();
+    userScriptStartDebugOverlay();
     console.info('[ytaf] UI started');
   } catch (err) {
     console.warn('[ytaf] Failed to start UI:', err);
