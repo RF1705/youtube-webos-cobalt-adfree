@@ -40,6 +40,38 @@ function stripYouTubeAds(value, depth = 0) {
   return changed;
 }
 
+// Drop `adSlotRenderer`
+// `adSlotRenderer` can occur as,
+// - sectionListRenderer.contents[*].adSlotRenderer
+// - sectionListRenderer.contents[*].shelfRenderer.content.horizontalListRenderer.items[*].adSlotRenderer
+function removeAdSlotRenderer(sectionListRenderer) {
+  if (!Array.isArray(sectionListRenderer?.contents)) return false;
+
+  let changed = false;
+
+  const beforeLength = sectionListRenderer.contents.length;
+  sectionListRenderer.contents = sectionListRenderer.contents.filter(
+    (elm) => !elm.adSlotRenderer
+  );
+  changed = changed || sectionListRenderer.contents.length !== beforeLength;
+
+  sectionListRenderer.contents
+    .filter((elm) => elm.shelfRenderer)
+    .forEach((content) => {
+      const horizontalRenderer =
+        content.shelfRenderer.content?.horizontalListRenderer;
+      if (!Array.isArray(horizontalRenderer?.items)) return;
+
+      const beforeItemsLength = horizontalRenderer.items.length;
+      horizontalRenderer.items = horizontalRenderer.items.filter(
+        (elm) => !elm.adSlotRenderer
+      );
+      changed = changed || horizontalRenderer.items.length !== beforeItemsLength;
+    });
+
+  return changed;
+}
+
 /**
  * This is a minimal reimplementation of the following uBlock Origin rule:
  * https://github.com/uBlockOrigin/uAssets/blob/3497eebd440f4871830b9b45af0afc406c6eb593/filters/filters.txt#L116
@@ -52,21 +84,48 @@ function stripYouTubeAds(value, depth = 0) {
 const origParse = JSON.parse;
 JSON.parse = function () {
   const r = origParse.apply(this, arguments);
-  if (configRead('enableAdBlock') && stripYouTubeAds(r)) {
+
+  if (!configRead('enableAdBlock')) {
+    return r;
+  }
+
+  if (stripYouTubeAds(r)) {
     console.log('Adblock Removed !');
   }
 
-  // Drop "masthead" ad from home screen
-  if (
+  // Drop "masthead" ad and ad tile from the horizontal shelf on the home screen
+  const homeSectionListRenderer =
     r?.contents?.tvBrowseRenderer?.content?.tvSurfaceContentRenderer?.content
-      ?.sectionListRenderer?.contents &&
-    configRead('enableAdBlock')
-  ) {
-    console.log('Adblock Removed (2) !');
-    r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents =
-      r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents.filter(
-        (elm) => !elm.tvMastheadRenderer
-      );
+      ?.sectionListRenderer;
+  if (homeSectionListRenderer?.contents) {
+    const beforeLength = homeSectionListRenderer.contents.length;
+    homeSectionListRenderer.contents = homeSectionListRenderer.contents.filter(
+      (elm) => !elm.tvMastheadRenderer
+    );
+    if (homeSectionListRenderer.contents.length !== beforeLength) {
+      console.log('Adblock Removed (2) !');
+    }
+
+    if (removeAdSlotRenderer(homeSectionListRenderer)) {
+      console.log('Adblock Removed (3) !');
+    }
+  }
+
+  // Drop ad tile from search results
+  const searchSectionListRenderer = r?.contents?.sectionListRenderer;
+  if (searchSectionListRenderer?.contents && removeAdSlotRenderer(searchSectionListRenderer)) {
+    console.log('Adblock Removed (4) !');
+  }
+
+  // Drop ads from the Shorts/reel feed
+  if (Array.isArray(r?.entries)) {
+    const beforeLength = r.entries.length;
+    r.entries = r.entries.filter(
+      (elm) => !elm?.command?.reelWatchEndpoint?.adClientParams?.isAd
+    );
+    if (r.entries.length !== beforeLength) {
+      console.log('Adblock Removed (5) !');
+    }
   }
 
   return r;
