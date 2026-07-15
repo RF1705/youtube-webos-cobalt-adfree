@@ -2,8 +2,7 @@ SHELL=/bin/bash
 
 .SECONDEXPANSION:
 
-MAKEFILE_PATH := $(abspath $(lastword $(MAKEFILE_LIST)))
-CURRENT_DIR := $(dir $(MAKEFILE_PATH))
+CURRENT_DIR := $(CURDIR)
 
 PACKAGE?=
 PACKAGE_NAME_OFFICIAL=youtube.leanback.v4
@@ -17,7 +16,13 @@ PACKAGE_IPK_BUILD=$(PACKAGE_NAME_TARGET)_$(PACKAGE_VERSION)_arm.ipk
 PACKAGE_OUTPUT_DIR?=output
 PACKAGE_TARGET?=$(PACKAGE_OUTPUT_DIR)/$(PACKAGE_IPK_BUILD)
 PACKAGE_SB_API_VERSION?=$(shell strings $(WORKDIR)/image/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt | grep sb_api | jq -r '.sb_api_version' | grep -v null || strings $(WORKDIR)/package/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt | grep sb_api | jq -r '.sb_api_version' | grep -v null)
-PACKAGE_COBALT_ARCHIVE?=cobalt-bin/$(PACKAGE_COBALT_VERSION)-$(PACKAGE_SB_API_VERSION).xz
+YTAF_DEBUG?=0
+YTAF_DEBUG_ENABLED=$(filter 1 true yes on,$(YTAF_DEBUG))
+COBALT_DEBUG?=$(YTAF_DEBUG)
+COBALT_DEBUG_ENABLED=$(filter 1 true yes on,$(COBALT_DEBUG))
+COBALT_DEBUG_SUFFIX=$(if $(COBALT_DEBUG_ENABLED),-logging,)
+COBALT_DEBUG_GN_ARG=$(if $(COBALT_DEBUG_ENABLED),true,false)
+PACKAGE_COBALT_ARCHIVE?=cobalt-bin/$(PACKAGE_COBALT_VERSION)-$(PACKAGE_SB_API_VERSION)$(COBALT_DEBUG_SUFFIX).xz
 OFFICAL_YOUTUBE_IPK?=ipks-official/2023-07-30-youtube.leanback.v4-1.1.7.ipk
 
 WORKDIR?=workdir
@@ -28,12 +33,15 @@ BUILD_COBALT_PARALLEL?=
 BUILD_COBALT_TYPE?=gold
 BUILD_COBALT_VERSION=$(word 1, $(subst -, ,$(BUILD_VERSION)))
 BUILD_COBALT_SB_API_VERSION=$(word 2, $(subst -, ,$(BUILD_VERSION)))
+BUILD_COBALT_DEBUG?=$(if $(filter logging,$(word 3, $(subst -, ,$(BUILD_VERSION)))),1,$(COBALT_DEBUG))
+BUILD_COBALT_DEBUG_ENABLED=$(filter 1 true yes on,$(BUILD_COBALT_DEBUG))
+BUILD_COBALT_DEBUG_GN_ARG=$(if $(BUILD_COBALT_DEBUG_ENABLED),true,false)
 BUILD_COBALT_ARCHITECTURE?=arm-softfp
 BUILD_COBALT_PLATFORM?=evergreen-$(BUILD_COBALT_ARCHITECTURE)
 BUILD_COBALT_TARGET?=cobalt
 BUILD_COBALT_YOUTUBE_APP_FILES_RULES=$(foreach file,$(WEBOS_YOUTUBE_APP_FILES),$(WORKDIR_COBALT)/cobalt/adblock/content/$(file))
 WEBAPP_OUTPUT_DIR?=webapp/output
-WEBAPP_DEBUG?=0
+WEBAPP_DEBUG?=$(YTAF_DEBUG)
 WEBAPP_OUTPUT_STAMP=webapp/.build-stamp.$(WEBAPP_DEBUG)
 NODE_DOCKER_IMAGE?=node:22
 
@@ -204,6 +212,11 @@ $(STANDALONE_WORKDIR):
 	  '"playIcon":"playIcon.png",' \
 	  '"iconColor":"#ffffff",' \
 	  '"resolution":"1920x1080",' \
+	  '"vendorExtension":{"userAgent":"$$browserName$$/$$browserVersion$$ ($$platformName$$-$$platformVersion$$), _TV_O18/$$firmwareVersion$$ (LG, $$modelName$$, $$networkMode$$)","allowCrossDomain":true},' \
+	  '"support360Content":true,' \
+	  '"trustLevel":"netcast",' \
+	  '"privilegedJail":true,' \
+	  '"supportGIP":true,' \
 	  '"uiRevision":2,' \
 	  '"nativeLifeCycleInterfaceVersion":2,' \
 	  '"supportQuickStart":true,' \
@@ -272,7 +285,7 @@ $(WORKDIR)/ipk/content/app/cobalt/content/web/adblock: $(WEBAPP_OUTPUT_STAMP)
 	rm -f $(WORKDIR)/ipk/drm.nfz
 	sed -i.bak 's/YouTube/$(PACKAGE_DISPLAY_NAME)/g' $(WORKDIR)/ipk/appinfo.json
 	rm -f $(WORKDIR)/ipk/appinfo.json.bak
-	jq --arg version "$(PACKAGE_VERSION)" 'del(.fileSystemType) | .version = $$version' < $(WORKDIR)/ipk/appinfo.json > $(WORKDIR)/ipk/appinfo2.json
+	jq --arg version "$(PACKAGE_VERSION)" 'del(.fileSystemType) | .version = $$version | .vendorExtension.userAgent = "$$browserName$$/$$browserVersion$$ ($$platformName$$-$$platformVersion$$), _TV_O18/$$firmwareVersion$$ (LG, $$modelName$$, $$networkMode$$)" | .vendorExtension.allowCrossDomain = true | .support360Content = true | .trustLevel = "netcast" | .privilegedJail = true | .supportGIP = true' < $(WORKDIR)/ipk/appinfo.json > $(WORKDIR)/ipk/appinfo2.json
 	mv $(WORKDIR)/ipk/appinfo2.json $(WORKDIR)/ipk/appinfo.json
 
 	cp assets/icon.png $(WORKDIR)/ipk/$$(jq -r '.icon' < $(WORKDIR)/ipk/appinfo.json)
@@ -283,8 +296,10 @@ $(WORKDIR)/ipk/content/app/cobalt/content/web/adblock: $(WEBAPP_OUTPUT_STAMP)
 	cp assets/imageForRecents.png $(WORKDIR)/ipk/$$(jq -r '.imageForRecents' < $(WORKDIR)/ipk/appinfo.json)
 
 	echo " --evergreen_lite" >> $(WORKDIR)/ipk/switches
-	echo " --remote_debugging_port=9222" >> $(WORKDIR)/ipk/switches
-	echo " --dev_servers_listen_ip=0.0.0.0" >> $(WORKDIR)/ipk/switches
+	if [ -n "$(COBALT_DEBUG_ENABLED)" ]; then \
+		echo " --remote_debugging_port=9222" >> $(WORKDIR)/ipk/switches; \
+		echo " --dev_servers_listen_ip=0.0.0.0" >> $(WORKDIR)/ipk/switches; \
+	fi
 
 ifneq ("$(PACKAGE_NAME_TARGET)","$(PACKAGE_NAME_OFFICIAL)")
 	grep -l -R "$(PACKAGE_NAME_OFFICIAL)" $(WORKDIR)/ipk | grep .json | xargs -n 1 sed -i.bak "s/$(PACKAGE_NAME_OFFICIAL)/$(PACKAGE_NAME_TARGET)/g"
@@ -366,7 +381,7 @@ clean-$(WORKDIR)/cobalt-%:
 	cd $(WORKDIR)/cobalt-$* && git checkout . && git clean -d -f
 
 cobalt-bin:
-	mkdir cobalt-bin
+	mkdir -p cobalt-bin
 
 .PRECIOUS: cobalt-bin/libcobalt-%/libcobalt.so
 cobalt-bin/%/libcobalt.so: BUILD_VERSION=$*
@@ -375,16 +390,21 @@ cobalt-bin/%/libcobalt.so: cobalt-bin $(WEBAPP_OUTPUT_STAMP)
 		git clone --depth 1 --branch $(BUILD_COBALT_VERSION) https://github.com/youtube/cobalt.git $(WORKDIR_COBALT); \
 	fi
 	if [ ! -f "$(WORKDIR_COBALT)/.patched" ]; then \
-		(cd $(WORKDIR_COBALT) && patch -p1 < $(CURRENT_DIR)/cobalt-patches/cobalt-$(BUILD_COBALT_VERSION).patch && touch .patched) || (echo "Missing patch for version $(BUILD_COBALT_VERSION)" && exit 1); \
+		(cd $(WORKDIR_COBALT) && patch -p1 < "$(CURRENT_DIR)/cobalt-patches/cobalt-$(BUILD_COBALT_VERSION).patch" && touch .patched) || (echo "Missing patch for version $(BUILD_COBALT_VERSION)" && exit 1); \
 	fi
 	perl -0pi -e 's/^(\s*)<<: \*common-definitions\n\1<<: \*build-volumes/$$1<<: [*common-definitions, *build-volumes]/mg' $(WORKDIR_COBALT)/docker-compose.yml
-	grep -q 'archive.debian.org/debian-security' $(WORKDIR_COBALT)/docker/linux/base/Dockerfile || \
-		perl -0pi -e 's/ENV PYTHONUNBUFFERED 1\n/ENV PYTHONUNBUFFERED 1\n\nRUN sed -i -e '"'"'s|http:\\/\\/security.debian.org|http:\\/\\/archive.debian.org\\/debian-security|'"'"' -e '"'"'s|http:\\/\\/httpredir.debian.org|http:\\/\\/archive.debian.org|'"'"' -e '"'"'s|deb http:\\/\\/archive.debian.org\\/debian stretch-updates|# deb http:\\/\\/archive.debian.org\\/debian stretch-updates|'"'"' \\/etc\\/apt\\/sources.list\n/' $(WORKDIR_COBALT)/docker/linux/base/Dockerfile
+	grep -q 'archive.debian.org/debian-security' "$(WORKDIR_COBALT)/docker/linux/base/Dockerfile" || \
+		perl -0pi -e 's{ENV PYTHONUNBUFFERED 1\n}{ENV PYTHONUNBUFFERED 1\n\nRUN sed -i -e "s|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|" -e "s|http://deb.debian.org/debian|http://archive.debian.org/debian|" -e "s|http://httpredir.debian.org/debian|http://archive.debian.org/debian|" -e "s|deb http://archive.debian.org/debian buster-updates|# deb http://archive.debian.org/debian buster-updates|" -e "s|deb http://archive.debian.org/debian stretch-updates|# deb http://archive.debian.org/debian stretch-updates|" /etc/apt/sources.list && printf "%s\\n" "Acquire::Check-Valid-Until false;" > /etc/apt/apt.conf.d/99archive\n}' "$(WORKDIR_COBALT)/docker/linux/base/Dockerfile"
 	perl -0pi -e 's/&& \. \/tmp\/install\.sh/&& bash \/tmp\/install.sh/g; s/nvm install --lts/nvm install 16/g; s/nvm alias default lts\/\*/nvm alias default 16\/*/g' $(WORKDIR_COBALT)/docker/linux/base/build/Dockerfile
+	grep -q 'ytaf_debug' "$(WORKDIR_COBALT)/starboard/build/config/BUILD.gn" || \
+		perl -0pi -e 's{import\("//build/config/compiler/compiler.gni"\)\n}{import("//build/config/compiler/compiler.gni")\n\ndeclare_args() {\n  ytaf_debug = false\n}\n}' "$(WORKDIR_COBALT)/starboard/build/config/BUILD.gn"
+	grep -q 'YTAF_COBALT_DEBUG' "$(WORKDIR_COBALT)/starboard/build/config/BUILD.gn" || \
+		perl -0pi -e 's{(\s*if \(enable_in_app_dial\) \{\n\s*defines \+= \[ "DIAL_SERVER" \]\n\s*\}\n)}{$$1\n  if (ytaf_debug) {\n    defines += [ "YTAF_COBALT_DEBUG" ]\n  }\n}' "$(WORKDIR_COBALT)/starboard/build/config/BUILD.gn"
+	perl -0pi -e 's{sb_api_version=\$\{SB_API_VERSION:-14\}(?! ytaf_debug)}{sb_api_version=$${SB_API_VERSION:-14} ytaf_debug=$${YTAF_COBALT_DEBUG:-false}}g' "$(WORKDIR_COBALT)/docker/linux/evergreen/Dockerfile" "$(WORKDIR_COBALT)/docker/linux/linux-x64x11/Dockerfile"
 	mkdir -p $(WORKDIR_COBALT)/cobalt/adblock/content
 	cp -r $(WEBAPP_OUTPUT_DIR)/. $(WORKDIR_COBALT)/cobalt/adblock/content/
 	cd $(WORKDIR_COBALT) && \
-	docker-compose run $(if $(BUILD_COBALT_PARALLEL),-e NINJA_PARALLEL=$(BUILD_COBALT_PARALLEL),) -e CONFIG="$(BUILD_COBALT_TYPE)" -e TARGET="$(BUILD_COBALT_TARGET)" -e SB_API_VERSION="$(BUILD_COBALT_SB_API_VERSION)" $(BUILD_COBALT_PLATFORM)
+	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker-compose run $(if $(BUILD_COBALT_PARALLEL),-e NINJA_PARALLEL=$(BUILD_COBALT_PARALLEL),) -e CONFIG="$(BUILD_COBALT_TYPE)" -e TARGET="$(BUILD_COBALT_TARGET)" -e SB_API_VERSION="$(BUILD_COBALT_SB_API_VERSION)" -e YTAF_COBALT_DEBUG="$(BUILD_COBALT_DEBUG_GN_ARG)" $(BUILD_COBALT_PLATFORM)
 	mkdir -p $(dir $@)
 	outdir="$(WORKDIR_COBALT)/out/$(BUILD_COBALT_PLATFORM)-sbversion-$(BUILD_COBALT_SB_API_VERSION)_$(BUILD_COBALT_TYPE)"; \
 	if [ ! -d "$$outdir" ]; then \
