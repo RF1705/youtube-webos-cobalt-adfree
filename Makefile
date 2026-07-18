@@ -210,7 +210,7 @@ $(STANDALONE_WORKDIR):
 	  '"splashBackground":"splashBackground.png",' \
 	  '"imageForRecents":"imageForRecents.png",' \
 	  '"playIcon":"playIcon.png",' \
-	  '"iconColor":"#ffffff",' \
+	  '"iconColor":"#ff0000",' \
 	  '"resolution":"1920x1080",' \
 	  '"vendorExtension":{"userAgent":"$$browserName$$/$$browserVersion$$ ($$platformName$$-$$platformVersion$$), _TV_O18/$$firmwareVersion$$ (LG, $$modelName$$, $$networkMode$$)","allowCrossDomain":true},' \
 	  '"support360Content":true,' \
@@ -285,7 +285,7 @@ $(WORKDIR)/ipk/content/app/cobalt/content/web/adblock: $(WEBAPP_OUTPUT_STAMP)
 	rm -f $(WORKDIR)/ipk/drm.nfz
 	sed -i.bak 's/YouTube/$(PACKAGE_DISPLAY_NAME)/g' $(WORKDIR)/ipk/appinfo.json
 	rm -f $(WORKDIR)/ipk/appinfo.json.bak
-	jq --arg version "$(PACKAGE_VERSION)" 'del(.fileSystemType) | .version = $$version | .vendorExtension.userAgent = "$$browserName$$/$$browserVersion$$ ($$platformName$$-$$platformVersion$$), _TV_O18/$$firmwareVersion$$ (LG, $$modelName$$, $$networkMode$$)" | .vendorExtension.allowCrossDomain = true | .support360Content = true | .trustLevel = "netcast" | .privilegedJail = true | .supportGIP = true' < $(WORKDIR)/ipk/appinfo.json > $(WORKDIR)/ipk/appinfo2.json
+	jq --arg version "$(PACKAGE_VERSION)" 'del(.fileSystemType) | .version = $$version | .iconColor = "#ff0000" | .vendorExtension.userAgent = "$$browserName$$/$$browserVersion$$ ($$platformName$$-$$platformVersion$$), _TV_O18/$$firmwareVersion$$ (LG, $$modelName$$, $$networkMode$$)" | .vendorExtension.allowCrossDomain = true | .support360Content = true | .trustLevel = "netcast" | .privilegedJail = true | .supportGIP = true' < $(WORKDIR)/ipk/appinfo.json > $(WORKDIR)/ipk/appinfo2.json
 	mv $(WORKDIR)/ipk/appinfo2.json $(WORKDIR)/ipk/appinfo.json
 
 	cp assets/icon.png $(WORKDIR)/ipk/$$(jq -r '.icon' < $(WORKDIR)/ipk/appinfo.json)
@@ -390,7 +390,7 @@ cobalt-bin/%/libcobalt.so: cobalt-bin $(WEBAPP_OUTPUT_STAMP)
 		git clone --depth 1 --branch $(BUILD_COBALT_VERSION) https://github.com/youtube/cobalt.git $(WORKDIR_COBALT); \
 	fi
 	if [ ! -f "$(WORKDIR_COBALT)/.patched" ]; then \
-		(cd $(WORKDIR_COBALT) && patch -p1 < "$(CURRENT_DIR)/cobalt-patches/cobalt-$(BUILD_COBALT_VERSION).patch" && touch .patched) || (echo "Missing patch for version $(BUILD_COBALT_VERSION)" && exit 1); \
+		(cd $(WORKDIR_COBALT) && git apply --recount "$(CURRENT_DIR)/cobalt-patches/cobalt-$(BUILD_COBALT_VERSION).patch" && touch .patched) || (echo "Missing or invalid patch for version $(BUILD_COBALT_VERSION)" && exit 1); \
 	fi
 	perl -0pi -e 's/^(\s*)<<: \*common-definitions\n\1<<: \*build-volumes/$$1<<: [*common-definitions, *build-volumes]/mg' $(WORKDIR_COBALT)/docker-compose.yml
 	grep -q 'archive.debian.org/debian-security' "$(WORKDIR_COBALT)/docker/linux/base/Dockerfile" || \

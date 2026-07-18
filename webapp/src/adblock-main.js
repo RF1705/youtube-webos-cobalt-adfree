@@ -1,7 +1,9 @@
 console.info('[ytaf] adblock-main.js LOADING');
 
+import './text-data-guard';
 import 'whatwg-fetch';
 import './domrect-polyfill';
+import './json-stringify-hook';
 import './ui.js';
 
 import { handleLaunch, waitForChildAdd } from './utils';

@@ -12,3 +12,10 @@
 /cobalt-bin/*
 !/cobalt-bin/*.xz
 .DS_Store
+
+# Local device settings and generated build artifacts
+/.webos/
+/downloads/
+/ipks-official/*.tar.gz
+/webapp/.build-stamp*
+/cobalt-bin/*-logging.xz

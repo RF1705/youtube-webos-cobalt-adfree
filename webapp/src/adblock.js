@@ -40,6 +40,47 @@ function stripYouTubeAds(value, depth = 0) {
   return changed;
 }
 
+function isAdditionalAdEntry(value) {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      (Object.prototype.hasOwnProperty.call(value, 'adSlotRenderer') ||
+        value.command?.reelWatchEndpoint?.adClientParams?.isAd)
+  );
+}
+
+// YouTube changes the nesting of browse and Shorts responses frequently. Remove
+// the matching renderer wherever it occurs instead of relying on one response path.
+function stripAdditionalYouTubeAds(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 32) return false;
+
+  let changed = false;
+
+  if (Array.isArray(value)) {
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      if (isAdditionalAdEntry(value[index])) {
+        value.splice(index, 1);
+        changed = true;
+      } else {
+        changed = stripAdditionalYouTubeAds(value[index], depth + 1) || changed;
+      }
+    }
+    return changed;
+  }
+
+  Object.keys(value).forEach((key) => {
+    if (key === 'adSlotRenderer') {
+      delete value[key];
+      changed = true;
+      return;
+    }
+
+    changed = stripAdditionalYouTubeAds(value[key], depth + 1) || changed;
+  });
+
+  return changed;
+}
+
 /**
  * This is a minimal reimplementation of the following uBlock Origin rule:
  * https://github.com/uBlockOrigin/uAssets/blob/3497eebd440f4871830b9b45af0afc406c6eb593/filters/filters.txt#L116
@@ -52,21 +93,17 @@ function stripYouTubeAds(value, depth = 0) {
 const origParse = JSON.parse;
 JSON.parse = function () {
   const r = origParse.apply(this, arguments);
-  if (configRead('enableAdBlock') && stripYouTubeAds(r)) {
+
+  if (!configRead('enableAdBlock')) {
+    return r;
+  }
+
+  if (stripYouTubeAds(r)) {
     console.log('Adblock Removed !');
   }
 
-  // Drop "masthead" ad from home screen
-  if (
-    r?.contents?.tvBrowseRenderer?.content?.tvSurfaceContentRenderer?.content
-      ?.sectionListRenderer?.contents &&
-    configRead('enableAdBlock')
-  ) {
-    console.log('Adblock Removed (2) !');
-    r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents =
-      r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents.filter(
-        (elm) => !elm.tvMastheadRenderer
-      );
+  if (stripAdditionalYouTubeAds(r)) {
+    console.log('Adblock Removed additional renderers !');
   }
 
   return r;
