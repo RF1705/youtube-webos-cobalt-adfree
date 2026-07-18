@@ -2,17 +2,23 @@
   "packages": [
     {
       "id": "youtube.leanback.v4",
-      "version": "1.1.0",
-      "type": "native",
       "title": "YouTube Cobalt AdFree",
+      "shortDescription": "YouTube TV with ad blocking and SponsorBlock support.",
       "iconUri": "https://raw.githubusercontent.com/RF1705/youtube-webos-cobalt-adfree/main/assets/largeIcon.png",
-      "sourceUrl": "https://github.com/RF1705/youtube-webos-cobalt-adfree",
-      "rootRequired": false,
-      "ipkUrl": "https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.1.0/youtube.leanback.v4_1.1.0_arm.ipk",
-      "ipkHash": {
-        "sha256": "1b5c8a4542e5b900f2ef8e0db412da33d3016e230a7d3301854fce6ed7d360bf"
-      },
-      "ipkSize": 47976800
+      "manifest": {
+        "id": "youtube.leanback.v4",
+        "version": "1.1.0",
+        "type": "native",
+        "title": "YouTube Cobalt AdFree",
+        "iconUri": "https://raw.githubusercontent.com/RF1705/youtube-webos-cobalt-adfree/main/assets/largeIcon.png",
+        "sourceUrl": "https://github.com/RF1705/youtube-webos-cobalt-adfree",
+        "rootRequired": false,
+        "ipkUrl": "https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.1.0/youtube.leanback.v4_1.1.0_arm.ipk",
+        "ipkHash": {
+          "sha256": "1b5c8a4542e5b900f2ef8e0db412da33d3016e230a7d3301854fce6ed7d360bf"
+        },
+        "ipkSize": 47976800
+      }
     }
   ]
 }
