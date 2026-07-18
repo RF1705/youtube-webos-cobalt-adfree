@@ -29,6 +29,8 @@ The release package uses its own app id, `com.cobalt.youtube.adfree`, so it can 
 * Installable as patched `.ipk` package
 
 The configuration screen can be opened with the **GREEN** button on the LG remote.
+While a video is playing, press **1** to decrease the playback speed or **3** to
+increase it. The available speeds range from 0.25× to 2×.
 
 ## Requirements
 

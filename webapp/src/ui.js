@@ -24,6 +24,7 @@ export function userScriptStartUI() {
   console.info('[ytaf] userScriptStartUI() called');
 
   const ARROW_KEY_CODE = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
+  const PLAYBACK_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
   let lastGreenKeyAt = 0;
 
   function getDirectionFromEvent(evt) {
@@ -54,6 +55,46 @@ export function userScriptStartUI() {
   function isGreenKey(evt) {
     const keyCode = getRemoteKeyCode(evt);
     return keyCode === 404 || keyCode === 172;
+  }
+
+  function getPlaybackRateShortcut(evt) {
+    const keyCode = getRemoteKeyCode(evt);
+    const key = evt.key || '';
+
+    if (key === '1' || evt.code === 'Digit1' || keyCode === 49) return -1;
+    if (key === '3' || evt.code === 'Digit3' || keyCode === 51) return 1;
+    return 0;
+  }
+
+  function adjustPlaybackRate(direction) {
+    const video = document.querySelector('video');
+    if (!video) return false;
+
+    const currentRate = Number(video.playbackRate) || 1;
+    const currentIndex = PLAYBACK_RATES.findIndex(
+      (rate) => Math.abs(rate - currentRate) < 0.01
+    );
+    const nearestIndex = PLAYBACK_RATES.reduce(
+      (nearest, rate, index) =>
+        Math.abs(rate - currentRate) < Math.abs(PLAYBACK_RATES[nearest] - currentRate)
+          ? index
+          : nearest,
+      0
+    );
+    const nextIndex = Math.max(
+      0,
+      Math.min(
+        PLAYBACK_RATES.length - 1,
+        (currentIndex === -1 ? nearestIndex : currentIndex) + direction
+      )
+    );
+    const nextRate = PLAYBACK_RATES[nextIndex];
+
+    if (nextRate === currentRate) return true;
+
+    video.playbackRate = nextRate;
+    showNotification(`Playback speed: ${nextRate}x`, 1800, 'green');
+    return true;
   }
 
   function moveFocus(dir) {
@@ -471,7 +512,18 @@ export function userScriptStartUI() {
       return false;
     }
 
+    const playbackRateShortcut = getPlaybackRateShortcut(evt);
     if (
+      evt.type === 'keydown' &&
+      !evt.repeat &&
+      !menuOpen &&
+      playbackRateShortcut !== 0 &&
+      adjustPlaybackRate(playbackRateShortcut)
+    ) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      return false;
+    } else if (
       evt.type === 'keydown' &&
       evt.charCode == 0 &&
       evt.keyCode == 187
