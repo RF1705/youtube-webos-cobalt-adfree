@@ -65,6 +65,22 @@ youtube.leanback.v4_1.1.0_arm.ipk
 The release also contains `youtube.leanback.v4.manifest.json` for installation
 through the webOS Homebrew Channel.
 
+### Custom Homebrew Channel repository
+
+This project also provides a custom Homebrew Channel repository:
+
+```text
+https://rf1705.github.io/youtube-webos-cobalt-adfree/homebrew-repository.json
+```
+
+In Homebrew Channel, open **Settings**, choose **Add repository**, and enter
+the URL above.
+
+> **Important:** This app uses the same app id (`youtube.leanback.v4`) as the
+> YouTube AdFree entry in the default WebOSBrew repository. Do not install both
+> variants at the same time: choose one repository entry and uninstall the
+> other variant first.
+
 ### Install via webOS Device Manager
 
 Use the webOS Device Manager and install the downloaded `.ipk` package.
