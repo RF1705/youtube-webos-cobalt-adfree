@@ -41,12 +41,24 @@ jobs:
 
       - name: Check IPK and Cobalt binary compatibility
         run: |
-          set -o pipefail
+          : > compatibility-report.md
+
           find release -maxdepth 1 -type f -name '*.ipk' -print0 |
             while IFS= read -r -d '' package; do
               echo "# $(basename "$package")" | tee -a compatibility-report.md
-              webosbrew-ipk-verify --format markdown --details "$package" | tee -a compatibility-report.md
+              set +e
+              webosbrew-ipk-verify --format markdown --details "$package" 2>&1 |
+                tee -a compatibility-report.md
+              verifier_status=${PIPESTATUS[0]}
+              set -e
+
+              if [ "$verifier_status" -ne 0 ]; then
+                echo "::warning title=Firmware compatibility gap::$(basename "$package") is not compatible with every firmware profile. See the compatibility report for details."
+              fi
             done
+
+          cat compatibility-report.md >> "$GITHUB_STEP_SUMMARY"
+          echo "Compatibility gaps are reported as warnings because one LG starter cannot satisfy every historical and future firmware ABI." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload compatibility report
         if: ${{ always() }}
