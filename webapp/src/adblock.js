@@ -14,6 +14,8 @@ const AD_KEYS = [
   'playerAds'
 ];
 
+const REEL_AD_VIDEO_TYPE = 'REEL_VIDEO_TYPE_AD';
+
 function stripYouTubeAds(value, depth = 0) {
   if (!value || typeof value !== 'object' || depth > 8) return false;
 
@@ -41,12 +43,29 @@ function stripYouTubeAds(value, depth = 0) {
 }
 
 function isAdditionalAdEntry(value) {
-  return Boolean(
-    value &&
-      typeof value === 'object' &&
-      (Object.prototype.hasOwnProperty.call(value, 'adSlotRenderer') ||
-        value.command?.reelWatchEndpoint?.adClientParams?.isAd)
-  );
+  if (!value || typeof value !== 'object') return false;
+
+  if (Object.prototype.hasOwnProperty.call(value, 'adSlotRenderer')) {
+    return true;
+  }
+
+  const reelEndpoints = [
+    value.command?.reelWatchEndpoint,
+    value.onSelectCommand?.reelWatchEndpoint,
+    value.navigationEndpoint?.reelWatchEndpoint,
+    value.reelItemRenderer?.navigationEndpoint?.reelWatchEndpoint,
+    value.tileRenderer?.onSelectCommand?.reelWatchEndpoint
+  ];
+
+  return reelEndpoints.some((endpoint) => {
+    const isAd = endpoint?.adClientParams?.isAd;
+
+    return (
+      isAd === true ||
+      isAd === 'true' ||
+      endpoint?.videoType === REEL_AD_VIDEO_TYPE
+    );
+  });
 }
 
 // YouTube changes the nesting of browse and Shorts responses frequently. Remove
