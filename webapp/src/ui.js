@@ -26,6 +26,7 @@ export function userScriptStartUI() {
   const ARROW_KEY_CODE = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
   const PLAYBACK_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
   let lastGreenKeyAt = 0;
+  let currentFocusIndex = -1;
 
   function getDirectionFromEvent(evt) {
     const key = (evt.key || '').toLowerCase();
@@ -106,19 +107,21 @@ export function userScriptStartUI() {
       return;
     }
 
-    const current = document.activeElement;
-    const currentIndex = focusableItems.findIndex((item) => item === current);
-    let nextIndex = currentIndex;
-
-    if (currentIndex === -1) {
-      nextIndex = 0;
-    } else if (dir === 'down' || dir === 'right') {
-      nextIndex = (currentIndex + 1) % focusableItems.length;
-    } else if (dir === 'up' || dir === 'left') {
-      nextIndex = (currentIndex - 1 + focusableItems.length) % focusableItems.length;
+    if (currentFocusIndex < 0 || currentFocusIndex >= focusableItems.length) {
+      const activeIndex = focusableItems.findIndex(
+        (item) => item === document.activeElement
+      );
+      currentFocusIndex = activeIndex === -1 ? 0 : activeIndex;
     }
 
-    const nextItem = focusableItems[nextIndex];
+    if (dir === 'down' || dir === 'right') {
+      currentFocusIndex = (currentFocusIndex + 1) % focusableItems.length;
+    } else if (dir === 'up' || dir === 'left') {
+      currentFocusIndex =
+        (currentFocusIndex - 1 + focusableItems.length) % focusableItems.length;
+    }
+
+    const nextItem = focusableItems[currentFocusIndex];
     if (nextItem) {
       nextItem.focus();
       lastTabIndex = nextItem.tabIndex;
@@ -357,6 +360,7 @@ export function userScriptStartUI() {
 
     if (target) {
       target.focus();
+      currentFocusIndex = focusableItems.indexOf(target);
       if (target.tabIndex !== null && target.tabIndex > 0) {
         lastTabIndex = target.tabIndex;
       }

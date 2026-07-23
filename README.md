@@ -10,7 +10,7 @@ This project patches the webOS YouTube application by replacing or modifying the
 
 > This project is unofficial and is not affiliated with YouTube, Google, LG or webOS.
 
-## v1.1.1
+## v1.1.2
 
 The latest release is available from the GitHub releases page:
 
@@ -64,7 +64,7 @@ Download a release `.ipk` package and install it using one of the following meth
 Recommended release package:
 
 ```text
-youtube.leanback.v4_1.1.1_arm.ipk
+youtube.leanback.v4_1.1.2_arm.ipk
 ```
 
 The release also contains `youtube.leanback.v4.manifest.json` for installation
@@ -104,14 +104,14 @@ the webOS app install service:
 ```sh
 mkdir -p /media/developer/temp
 cd /media/developer/temp
-wget https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.1.1/youtube.leanback.v4_1.1.1_arm.ipk
-luna-send-pub -i 'luna://com.webos.appInstallService/dev/install' '{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/youtube.leanback.v4_1.1.1_arm.ipk","subscribe":true}'
+wget https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.1.2/youtube.leanback.v4_1.1.2_arm.ipk
+luna-send-pub -i 'luna://com.webos.appInstallService/dev/install' '{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/youtube.leanback.v4_1.1.2_arm.ipk","subscribe":true}'
 ```
 
 After installation, the downloaded package can be removed:
 
 ```sh
-rm /media/developer/temp/youtube.leanback.v4_1.1.1_arm.ipk
+rm /media/developer/temp/youtube.leanback.v4_1.1.2_arm.ipk
 ```
 
 ## Patch an official YouTube IPK

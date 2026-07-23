@@ -9,7 +9,7 @@ PACKAGE_NAME_OFFICIAL=youtube.leanback.v4
 PACKAGE_NAME?=youtube.leanback.v4
 PACKAGE_NAME_TARGET=$(PACKAGE_NAME)
 PACKAGE_DISPLAY_NAME?=YouTube webOS Cobalt AdFree
-PROJECT_VERSION?=1.1.1
+PROJECT_VERSION?=1.1.2
 PACKAGE_COBALT_VERSION?=23.lts.4
 PACKAGE_VERSION?=$(PROJECT_VERSION)
 PACKAGE_IPK_BUILD=$(PACKAGE_NAME_TARGET)_$(PACKAGE_VERSION)_arm.ipk
@@ -32,7 +32,7 @@ COMPAT_TEST_OFFICIAL_YOUTUBE_IPK?=ipks-official/2022-12-01-youtube.leanback.v4-1
 COMPAT_TEST_PACKAGE_NAME?=com.cobalt.youtube.adfree.compat
 COMPAT_TEST_DISPLAY_NAME?=YouTube Cobalt AdFree Compatibility Test
 # webOS requires versions in strictly numeric major.minor.patch form.
-COMPAT_TEST_VERSION?=1.1.1
+COMPAT_TEST_VERSION?=1.1.2
 
 WORKDIR?=workdir
 WORKDIR_COBALT?=$(WORKDIR)/cobalt-$(BUILD_COBALT_VERSION)
