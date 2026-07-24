@@ -1,0 +1,8 @@
+body.ytaf-bypassing-login .WEB_PAGE_TYPE_ACCOUNT_SELECTOR,
+body.ytaf-bypassing-login ytlr-account-selector,
+body.ytaf-bypassing-login .ytlr-account-selector,
+body.ytaf-bypassing-login [class*='account-selector'] {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  display: none !important;
+}

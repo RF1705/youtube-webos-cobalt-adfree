@@ -1,8 +1,129 @@
 /* eslint no-redeclare: 0 */
 /* global fetch:writable */
 import { configRead } from './config';
+import './adblock.css';
 
-export function userScriptStartAdBlock() {}
+const AD_RENDERER_SELECTOR = [
+  'ytlr-ad-slot-renderer',
+  'ytd-ad-slot-renderer',
+  '.ytlr-ad-slot-renderer',
+  '.ytd-ad-slot-renderer',
+  '[class*="ad-slot-renderer"]'
+].join(',');
+const AD_TILE_SELECTOR = [
+  'ytlr-rich-item-renderer',
+  'ytd-rich-item-renderer',
+  'ytlr-grid-item-renderer',
+  'ytlr-tile-renderer',
+  '[role="listitem"]',
+  '[role="gridcell"]'
+].join(',');
+
+let adSlotObserver = null;
+
+function findAdTile(adRenderer) {
+  const semanticTile = adRenderer.closest(AD_TILE_SELECTOR);
+  if (semanticTile) return semanticTile;
+
+  /*
+   * Older YouTube TV builds use obfuscated wrapper names. Find the direct
+   * child of the nearest multi-item flex/grid container without relying on
+   * those names.
+   */
+  let candidate = adRenderer;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const parent = candidate.parentElement;
+    if (!parent || parent === document.body) break;
+
+    const display = window.getComputedStyle(parent).display;
+    if (
+      candidate !== adRenderer &&
+      parent.children.length > 1 &&
+      (display === 'flex' ||
+        display === 'inline-flex' ||
+        display === 'grid' ||
+        display === 'inline-grid')
+    ) {
+      return candidate;
+    }
+
+    candidate = parent;
+  }
+
+  return adRenderer;
+}
+
+function hideAdRenderer(adRenderer) {
+  if (!adRenderer || adRenderer.nodeType !== 1) return;
+  findAdTile(adRenderer).classList.add('ytaf-hidden-ad-tile');
+}
+
+function processAddedNode(node) {
+  if (!node || node.nodeType !== 1) return;
+
+  if (node.matches(AD_RENDERER_SELECTOR)) {
+    hideAdRenderer(node);
+  }
+
+  node.querySelectorAll(AD_RENDERER_SELECTOR).forEach(hideAdRenderer);
+}
+
+function startAdSlotObserver() {
+  if (adSlotObserver || !document.body) return;
+
+  document
+    .querySelectorAll(AD_RENDERER_SELECTOR)
+    .forEach(hideAdRenderer);
+
+  adSlotObserver = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      mutation.addedNodes.forEach(processAddedNode);
+    });
+  });
+  adSlotObserver.observe(document.body, {
+    childList: true,
+    subtree: true
+  });
+}
+
+function stopAdSlotObserver() {
+  if (adSlotObserver) {
+    adSlotObserver.disconnect();
+    adSlotObserver = null;
+  }
+
+  document.querySelectorAll('.ytaf-hidden-ad-tile').forEach((tile) => {
+    tile.classList.remove('ytaf-hidden-ad-tile');
+  });
+}
+
+function syncAdblockStyles() {
+  const enabled = Boolean(configRead('enableAdBlock'));
+  document.documentElement.classList.toggle(
+    'ytaf-adblock-enabled',
+    enabled
+  );
+
+  if (enabled) {
+    startAdSlotObserver();
+  } else {
+    stopAdSlotObserver();
+  }
+}
+
+export function userScriptStartAdBlock() {
+  syncAdblockStyles();
+}
+
+document.addEventListener(
+  'ytaf-config-changed',
+  (event) => {
+    if (event.detail && event.detail.key === 'enableAdBlock') {
+      syncAdblockStyles();
+    }
+  },
+  true
+);
 
 const AD_KEYS = [
   'adBreakHeartbeatParams',

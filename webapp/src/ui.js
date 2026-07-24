@@ -181,6 +181,14 @@ export function userScriptStartUI() {
   );
   uiContainer.appendChild(
     checkboxTools.add(
+      '__auto_login',
+      text('autoLogin'),
+      configRead('enableAutoLogin'),
+      callbackConfig('enableAutoLogin')
+    )
+  );
+  uiContainer.appendChild(
+    checkboxTools.add(
       '__return_youtube_dislike',
       text('ryd'),
       configRead('enableReturnYouTubeDislike'),

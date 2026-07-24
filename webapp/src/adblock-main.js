@@ -12,6 +12,7 @@ import { userScriptStartUI } from './ui.js';
 import { userScriptStartAdBlock } from './adblock.js';
 import { userScriptStartSponsorBlock } from './sponsorblock.js';
 import { userScriptStartReturnYouTubeDislike } from './returnyoutubedislike.js';
+import { resetAutoLogin } from './auto-login.js';
 
 console.info('[ytaf] adblock-main.js LOADED, all imports successful');
 
@@ -21,6 +22,7 @@ document.addEventListener(
   'webOSRelaunch',
   (evt) => {
     console.info('RELAUNCH:', evt, window.launchParams);
+    resetAutoLogin();
     handleLaunch(evt.detail);
   },
   true

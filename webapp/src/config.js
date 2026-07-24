@@ -11,6 +11,7 @@ const defaultConfig = {
   enableSponsorBlockPreview: false,
   enableSponsorBlockFiller: false,
   enableSponsorBlockHook: false,
+  enableAutoLogin: true,
   enableReturnYouTubeDislike: true
 };
 

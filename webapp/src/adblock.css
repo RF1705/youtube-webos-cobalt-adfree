@@ -1,0 +1,28 @@
+html.ytaf-adblock-enabled ytlr-ad-slot-renderer,
+html.ytaf-adblock-enabled ytd-ad-slot-renderer,
+html.ytaf-adblock-enabled .ytlr-ad-slot-renderer,
+html.ytaf-adblock-enabled .ytd-ad-slot-renderer,
+html.ytaf-adblock-enabled [class*='ad-slot-renderer'],
+html.ytaf-adblock-enabled ytlr-tv-masthead-renderer,
+html.ytaf-adblock-enabled ytd-masthead-ad-v3-renderer {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+html.ytaf-adblock-enabled .ytaf-hidden-ad-tile {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/*
+ * Newer engines can remove the surrounding feed tile as well. Older Cobalt
+ * versions ignore this rule but still use the direct renderer selectors above.
+ */
+html.ytaf-adblock-enabled ytlr-rich-item-renderer:has(ytlr-ad-slot-renderer),
+html.ytaf-adblock-enabled ytd-rich-item-renderer:has(ytd-ad-slot-renderer) {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
