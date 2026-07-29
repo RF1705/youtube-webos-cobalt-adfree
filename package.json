@@ -1,5 +1,6 @@
 {
   "dependencies": {
-    "@webosose/ares-cli": "^2.4.0"
+    "@webosose/ares-cli": "^2.4.0",
+    "form-data": "^2.5.4"
   }
 }
