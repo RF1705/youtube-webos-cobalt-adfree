@@ -1,0 +1,62 @@
+# Experimental package that selects an LG Cobalt starter at launch time.
+# Use explicitly: make -f Makefile.multistarter multistarter-package
+
+include Makefile
+
+MULTISTARTER_VERSION?=1.2.190
+MULTISTARTER_DISPLAY_NAME?=YouTube Cobalt AdFree Multi-Starter Test
+MULTISTARTER_DEFAULT?=auto
+MULTISTARTER_SB13_COBALT_ARCHIVE?=$(or $(wildcard cobalt-bin/23.lts.6-13.xz),$(PRIVATE_IMAGES_DIR)/cobalt-bin/23.lts.6-13.xz)
+MULTISTARTER_SB14_STARTER?=$(PRIVATE_IMAGES_DIR)/starters/oled48c48la-webos-9.2.2/cobalt
+MULTISTARTER_SB16_STARTER?=$(PRIVATE_IMAGES_DIR)/starters/oled55c36lc-webos-10.3.1/cobalt
+MULTISTARTER_IPK=$(PACKAGE_OUTPUT_DIR)/$(PACKAGE_NAME)_$(MULTISTARTER_VERSION)_arm.ipk
+MULTISTARTER_BUILT_IPK=$(WORKDIR)/ipk-output/$(PACKAGE_NAME)_$(MULTISTARTER_VERSION)_arm.ipk
+
+MULTISTARTER_MAKE_ARGS=\
+	PACKAGE="$(OFFICAL_YOUTUBE_IPK)" \
+	PACKAGE_NAME_OFFICIAL="$(PACKAGE_NAME_OFFICIAL)" \
+	PACKAGE_NAME="$(PACKAGE_NAME)" \
+	PACKAGE_DISPLAY_NAME="$(MULTISTARTER_DISPLAY_NAME)" \
+	PACKAGE_VERSION="$(MULTISTARTER_VERSION)" \
+	PROJECT_VERSION="$(MULTISTARTER_VERSION)" \
+	PACKAGE_SB_API_VERSION=13 \
+	PACKAGE_COBALT_VERSION=23.lts.6 \
+	PACKAGE_COBALT_ARCHIVE="$(MULTISTARTER_SB13_COBALT_ARCHIVE)"
+
+.PHONY: multistarter-check
+multistarter-check:
+	@test -f "$(MULTISTARTER_SB13_COBALT_ARCHIVE)" || (echo "Missing Starboard 13 Cobalt archive: $(MULTISTARTER_SB13_COBALT_ARCHIVE)" && exit 1)
+	@test -f "$(MULTISTARTER_SB14_STARTER)" || (echo "Missing webOS 24 / Starboard 14 starter: $(MULTISTARTER_SB14_STARTER)" && echo "Extract OLED48C48.zip as described in docs/multistarter-test-package.md or override MULTISTARTER_SB14_STARTER." && exit 1)
+	@test -f "$(MULTISTARTER_SB16_STARTER)" || (echo "Missing webOS 25 / Starboard 16 starter: $(MULTISTARTER_SB16_STARTER)" && exit 1)
+	@case "$(MULTISTARTER_DEFAULT)" in auto|sb13|sb14|sb16) ;; *) echo "MULTISTARTER_DEFAULT must be auto, sb13, sb14 or sb16"; exit 1;; esac
+
+.PHONY: multistarter-package
+multistarter-package: images multistarter-check
+	$(MAKE) clean-ipk
+	$(MAKE) "$(WORKDIR)/image/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt" $(MULTISTARTER_MAKE_ARGS)
+	$(MAKE) "$(WORKDIR)/cobalt" $(MULTISTARTER_MAKE_ARGS)
+	$(MAKE) "$(WORKDIR)/ipk/content/app/cobalt/content/web/adblock" $(MULTISTARTER_MAKE_ARGS)
+	sh scripts/prepare-multistarter-package.sh \
+		"$(WORKDIR)/ipk" \
+		"$(MULTISTARTER_SB14_STARTER)" \
+		"$(MULTISTARTER_SB16_STARTER)" \
+		"$(MULTISTARTER_DEFAULT)"
+	$(MAKE) ares-package-docker $(MULTISTARTER_MAKE_ARGS)
+	mkdir -p "$(dir $(MULTISTARTER_IPK))"
+	python3 "$(IPK_MTIME_NORMALIZER)" --mtime "$(IPK_MEMBER_MTIME)" "$(MULTISTARTER_BUILT_IPK)"
+	mv "$(MULTISTARTER_BUILT_IPK)" "$(MULTISTARTER_IPK)"
+	@echo ""
+	@echo "Experimental multi-starter package:"
+	@echo "  $(MULTISTARTER_IPK)"
+	@echo ""
+	@echo "Selector log on the TV:"
+	@echo "  /tmp/ytaf-cobalt-selector.log"
+
+.PHONY: multistarter-status
+multistarter-status: images
+	@echo "Starboard 13 runtime: $(MULTISTARTER_SB13_COBALT_ARCHIVE)"
+	@test -f "$(MULTISTARTER_SB13_COBALT_ARCHIVE)" && echo "  OK" || echo "  MISSING"
+	@echo "Starboard 14 starter: $(MULTISTARTER_SB14_STARTER)"
+	@test -f "$(MULTISTARTER_SB14_STARTER)" && echo "  OK" || echo "  MISSING"
+	@echo "Starboard 16 starter: $(MULTISTARTER_SB16_STARTER)"
+	@test -f "$(MULTISTARTER_SB16_STARTER)" && echo "  OK" || echo "  MISSING"
