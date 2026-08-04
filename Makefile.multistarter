@@ -13,8 +13,6 @@ MULTISTARTER_DEFAULT?=auto
 MULTISTARTER_SB13_COBALT_ARCHIVE?=$(or $(wildcard cobalt-bin/23.lts.6-13.xz),$(PRIVATE_IMAGES_DIR)/cobalt-bin/23.lts.6-13.xz)
 MULTISTARTER_SB14_ALIAS?=$(PRIVATE_IMAGES_DIR)/starters/by-starboard/sb14.path
 MULTISTARTER_SB16_ALIAS?=$(PRIVATE_IMAGES_DIR)/starters/by-starboard/sb16.path
-MULTISTARTER_SB14_STARTER?=$(PRIVATE_IMAGES_DIR)/$(shell cat "$(MULTISTARTER_SB14_ALIAS)" 2>/dev/null)
-MULTISTARTER_SB16_STARTER?=$(PRIVATE_IMAGES_DIR)/$(shell cat "$(MULTISTARTER_SB16_ALIAS)" 2>/dev/null)
 
 MULTISTARTER_IPK=$(PACKAGE_OUTPUT_DIR)/$(PACKAGE_NAME)_$(MULTISTARTER_VERSION)_arm.ipk
 MULTISTARTER_BUILT_IPK=$(WORKDIR)/ipk-output/$(PACKAGE_NAME)_$(MULTISTARTER_VERSION)_arm.ipk
@@ -32,12 +30,15 @@ MULTISTARTER_MAKE_ARGS=\
 
 .PHONY: multistarter-check
 multistarter-check: images
-	@test -f "$(MULTISTARTER_SB13_COBALT_ARCHIVE)" || (echo "Missing Starboard 13 Cobalt archive: $(MULTISTARTER_SB13_COBALT_ARCHIVE)" && exit 1)
-	@test -f "$(MULTISTARTER_SB14_ALIAS)" || (echo "Missing Starboard 14 alias: $(MULTISTARTER_SB14_ALIAS)" && exit 1)
-	@test -f "$(MULTISTARTER_SB16_ALIAS)" || (echo "Missing Starboard 16 alias: $(MULTISTARTER_SB16_ALIAS)" && exit 1)
-	@test -f "$(MULTISTARTER_SB14_STARTER)" || (echo "Missing Starboard 14 starter resolved from $(MULTISTARTER_SB14_ALIAS): $(MULTISTARTER_SB14_STARTER)" && exit 1)
-	@test -f "$(MULTISTARTER_SB16_STARTER)" || (echo "Missing Starboard 16 starter resolved from $(MULTISTARTER_SB16_ALIAS): $(MULTISTARTER_SB16_STARTER)" && exit 1)
-	@case "$(MULTISTARTER_DEFAULT)" in auto|sb13|sb14|sb16) ;; *) echo "MULTISTARTER_DEFAULT must be auto, sb13, sb14 or sb16"; exit 1;; esac
+	@set -eu; \
+	test -f "$(MULTISTARTER_SB13_COBALT_ARCHIVE)" || { echo "Missing Starboard 13 Cobalt archive: $(MULTISTARTER_SB13_COBALT_ARCHIVE)"; exit 1; }; \
+	test -f "$(MULTISTARTER_SB14_ALIAS)" || { echo "Missing Starboard 14 alias: $(MULTISTARTER_SB14_ALIAS)"; exit 1; }; \
+	test -f "$(MULTISTARTER_SB16_ALIAS)" || { echo "Missing Starboard 16 alias: $(MULTISTARTER_SB16_ALIAS)"; exit 1; }; \
+	sb14="$(PRIVATE_IMAGES_DIR)/$$(cat "$(MULTISTARTER_SB14_ALIAS)")"; \
+	sb16="$(PRIVATE_IMAGES_DIR)/$$(cat "$(MULTISTARTER_SB16_ALIAS)")"; \
+	test -f "$$sb14" || { echo "Missing Starboard 14 starter resolved from $(MULTISTARTER_SB14_ALIAS): $$sb14"; exit 1; }; \
+	test -f "$$sb16" || { echo "Missing Starboard 16 starter resolved from $(MULTISTARTER_SB16_ALIAS): $$sb16"; exit 1; }; \
+	case "$(MULTISTARTER_DEFAULT)" in auto|sb13|sb14|sb16) ;; *) echo "MULTISTARTER_DEFAULT must be auto, sb13, sb14 or sb16"; exit 1;; esac
 
 .PHONY: multistarter-package
 multistarter-package: multistarter-check
@@ -45,10 +46,13 @@ multistarter-package: multistarter-check
 	$(MAKE) "$(WORKDIR)/image/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt" $(MULTISTARTER_MAKE_ARGS)
 	$(MAKE) "$(WORKDIR)/cobalt" $(MULTISTARTER_MAKE_ARGS)
 	$(MAKE) "$(WORKDIR)/ipk/content/app/cobalt/content/web/adblock" $(MULTISTARTER_MAKE_ARGS)
+	@set -eu; \
+	sb14="$(PRIVATE_IMAGES_DIR)/$$(cat "$(MULTISTARTER_SB14_ALIAS)")"; \
+	sb16="$(PRIVATE_IMAGES_DIR)/$$(cat "$(MULTISTARTER_SB16_ALIAS)")"; \
 	sh scripts/prepare-multistarter-package.sh \
 		"$(WORKDIR)/ipk" \
-		"$(MULTISTARTER_SB14_STARTER)" \
-		"$(MULTISTARTER_SB16_STARTER)" \
+		"$$sb14" \
+		"$$sb16" \
 		"$(MULTISTARTER_DEFAULT)"
 	$(MAKE) ares-package-docker $(MULTISTARTER_MAKE_ARGS)
 	mkdir -p "$(dir $(MULTISTARTER_IPK))"
@@ -63,11 +67,22 @@ multistarter-package: multistarter-check
 
 .PHONY: multistarter-status
 multistarter-status: images
-	@echo "Starboard 13 runtime: $(MULTISTARTER_SB13_COBALT_ARCHIVE)"
-	@test -f "$(MULTISTARTER_SB13_COBALT_ARCHIVE)" && echo "  OK" || echo "  MISSING"
-	@echo "Starboard 14 alias: $(MULTISTARTER_SB14_ALIAS)"
-	@echo "Starboard 14 starter: $(MULTISTARTER_SB14_STARTER)"
-	@test -f "$(MULTISTARTER_SB14_STARTER)" && echo "  OK" || echo "  MISSING"
-	@echo "Starboard 16 alias: $(MULTISTARTER_SB16_ALIAS)"
-	@echo "Starboard 16 starter: $(MULTISTARTER_SB16_STARTER)"
-	@test -f "$(MULTISTARTER_SB16_STARTER)" && echo "  OK" || echo "  MISSING"
+	@set -u; \
+	echo "Starboard 13 runtime: $(MULTISTARTER_SB13_COBALT_ARCHIVE)"; \
+	test -f "$(MULTISTARTER_SB13_COBALT_ARCHIVE)" && echo "  OK" || echo "  MISSING"; \
+	echo "Starboard 14 alias: $(MULTISTARTER_SB14_ALIAS)"; \
+	if test -f "$(MULTISTARTER_SB14_ALIAS)"; then \
+		sb14="$(PRIVATE_IMAGES_DIR)/$$(cat "$(MULTISTARTER_SB14_ALIAS)")"; \
+		echo "Starboard 14 starter: $$sb14"; \
+		test -f "$$sb14" && echo "  OK" || echo "  MISSING"; \
+	else \
+		echo "  MISSING ALIAS"; \
+	fi; \
+	echo "Starboard 16 alias: $(MULTISTARTER_SB16_ALIAS)"; \
+	if test -f "$(MULTISTARTER_SB16_ALIAS)"; then \
+		sb16="$(PRIVATE_IMAGES_DIR)/$$(cat "$(MULTISTARTER_SB16_ALIAS)")"; \
+		echo "Starboard 16 starter: $$sb16"; \
+		test -f "$$sb16" && echo "  OK" || echo "  MISSING"; \
+	else \
+		echo "  MISSING ALIAS"; \
+	fi
