@@ -46,7 +46,7 @@ jobs:
         run: |
           [[ "$BASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "$TEST_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          grep -F '[YTAF] Forcing VP9 support on UHD output' \
+          grep -F '[YTAF] Forcing explicit VP9 SDR UHD support' \
             cobalt-patches/cobalt-23.lts.6.patch
 
       - name: Install build tools

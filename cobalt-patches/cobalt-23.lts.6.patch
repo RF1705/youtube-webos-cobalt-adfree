@@ -270,25 +270,82 @@ index 1a1f7ba30..99bd40372 100644
    // 5. 6. Not needed by Cobalt.
 
 diff --git a/cobalt/media/media_module.cc b/cobalt/media/media_module.cc
-index aedc5c6f5..2b9cfd1f6 100644
+index aedc5c6f5..194fb18c8 100644
 --- a/cobalt/media/media_module.cc
 +++ b/cobalt/media/media_module.cc
-@@ -91,6 +91,36 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
+@@ -22,6 +22,7 @@
+ #include "base/bind.h"
+ #include "base/callback.h"
+ #include "base/logging.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_split.h"
+ #include "base/synchronization/waitable_event.h"
+ #include "cobalt/media/base/format_support_query_metrics.h"
+@@ -91,6 +92,85 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
    return "";
  }
  
-+static bool IsVp9VideoMimeType(const std::string& mime_type) {
-+  if (mime_type.find("video/") == std::string::npos) {
++static bool ExtractMimeTypeParameter(const std::string& mime_type,
++                                     const std::string& parameter_name,
++                                     std::string* value) {
++  const std::vector<std::string> components = base::SplitString(
++      mime_type, ";", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++  if (components.size() < 2) {
 +    return false;
 +  }
-+
-+  const std::vector<std::string> codecs = ExtractCodecs(mime_type);
-+  for (const auto& codec : codecs) {
-+    if (codec.find("vp9") == 0 || codec.find("vp09") == 0) {
++  for (auto iter = components.begin() + 1; iter != components.end(); ++iter) {
++    std::vector<std::string> name_and_value = base::SplitString(
++        *iter, "=", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    if (name_and_value.size() == 2 && name_and_value[0] == parameter_name) {
++      base::RemoveChars(name_and_value[1], "\"", value);
 +      return true;
 +    }
 +  }
 +  return false;
++}
++
++static bool ExtractMimeTypeIntParameter(const std::string& mime_type,
++                                        const std::string& parameter_name,
++                                        int* value) {
++  std::string string_value;
++  return ExtractMimeTypeParameter(mime_type, parameter_name, &string_value) &&
++         base::StringToInt(string_value, value);
++}
++
++static bool IsExplicitVp9SdrUhdQuery(const std::string& mime_type) {
++  if (mime_type.find("video/") != 0) {
++    return false;
++  }
++
++  const std::vector<std::string> codecs = ExtractCodecs(mime_type);
++  if (codecs.size() != 1 ||
++      (codecs[0] != "vp9" && codecs[0] != "vp09" &&
++       codecs[0].find("vp09.00.") != 0)) {
++    return false;
++  }
++
++  int width = 0;
++  int height = 0;
++  int frame_rate = 0;
++  int bitrate = 0;
++  if (!ExtractMimeTypeIntParameter(mime_type, "width", &width) ||
++      !ExtractMimeTypeIntParameter(mime_type, "height", &height) ||
++      !ExtractMimeTypeIntParameter(mime_type, "framerate", &frame_rate) ||
++      !ExtractMimeTypeIntParameter(mime_type, "bitrate", &bitrate)) {
++    return false;
++  }
++
++  const bool is_supported_resolution =
++      (width == 2560 && height == 1440) ||
++      (width == 3840 && height == 2160);
++  if (!is_supported_resolution || frame_rate <= 0 || frame_rate > 60 ||
++      bitrate <= 0 || bitrate > 60000000) {
++    return false;
++  }
++
++  std::string eotf;
++  return !ExtractMimeTypeParameter(mime_type, "eotf", &eotf) ||
++         eotf == "bt709";
 +}
 +
 +static bool Has4kVideoOutput() {
@@ -310,20 +367,18 @@ index aedc5c6f5..2b9cfd1f6 100644
  class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
   public:
    void SetDisabledMediaCodecs(
-@@ -171,6 +201,19 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
+@@ -171,6 +251,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
      }
      SbMediaSupportType type =
          SbMediaCanPlayMimeAndKeySystem(mime_type.c_str(), key_system.c_str());
 +
-+    // Some LG webOS Starboard implementations report VP9 as unsupported for
-+    // UHD profiles even though the same hardware plays VP9 UHD in the stock
-+    // YouTube application.  Only override clear VP9 queries on devices whose
-+    // effective video output is at least 3840x2160.  The graphics/UI surface
-+    // may remain 1920x1080; GetVideoOutputResolution() accounts for the
-+    // platform's video pixel ratio.
++    // Override only explicit, sane VP9 profile 0 SDR 1440p/2160p capability
++    // probes.  In particular, preserve Starboard's answer for generic VP9,
++    // HDR/profile 2, DRM, and deliberate sentinel probes with impossible
++    // dimensions, frame rates, bitrates, or transfer functions.
 +    if (type == kSbMediaSupportTypeNotSupported && key_system.empty() &&
-+        IsVp9VideoMimeType(mime_type) && Has4kVideoOutput()) {
-+      LOG(WARNING) << "[YTAF] Forcing VP9 support on UHD output: "
++        IsExplicitVp9SdrUhdQuery(mime_type) && Has4kVideoOutput()) {
++      LOG(WARNING) << "[YTAF] Forcing explicit VP9 SDR UHD support: "
 +                   << mime_type;
 +      return kSbMediaSupportTypeProbably;
 +    }
