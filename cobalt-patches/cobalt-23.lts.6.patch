@@ -281,7 +281,7 @@ index aedc5c6f5..194fb18c8 100644
  #include "base/strings/string_split.h"
  #include "base/synchronization/waitable_event.h"
  #include "cobalt/media/base/format_support_query_metrics.h"
-@@ -91,6 +92,85 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
+@@ -91,6 +92,117 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
    return "";
  }
  
@@ -318,10 +318,42 @@ index aedc5c6f5..194fb18c8 100644
 +  }
 +
 +  const std::vector<std::string> codecs = ExtractCodecs(mime_type);
-+  if (codecs.size() != 1 ||
-+      (codecs[0] != "vp9" && codecs[0] != "vp09" &&
-+       codecs[0].find("vp09.00.") != 0)) {
++  if (codecs.size() != 1) {
 +    return false;
++  }
++
++  const std::string& codec = codecs[0];
++  if (codec != "vp9" && codec != "vp09") {
++    const std::vector<std::string> codec_parts = base::SplitString(
++        codec, ".", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    if ((codec_parts.size() != 4 && codec_parts.size() != 9 &&
++         codec_parts.size() != 10) ||
++        codec_parts[0] != "vp09" || codec_parts[1] != "00") {
++      return false;
++    }
++
++    const std::string& level = codec_parts[2];
++    const std::string& bit_depth = codec_parts[3];
++    if (level.size() != 2 ||
++        level.find_first_not_of("0123456789") != std::string::npos ||
++        bit_depth.size() != 2 ||
++        bit_depth.find_first_not_of("0123456789") != std::string::npos ||
++        (level != "10" && level != "11" && level != "20" &&
++         level != "21" && level != "30" && level != "31" &&
++         level != "40" && level != "41" && level != "50" &&
++         level != "51" && level != "52" && level != "60" &&
++         level != "61" && level != "62") ||
++        (bit_depth != "08" && bit_depth != "10" && bit_depth != "12")) {
++      return false;
++    }
++
++    for (size_t index = 4; index < codec_parts.size(); ++index) {
++      if (codec_parts[index].size() != 2 ||
++          codec_parts[index].find_first_not_of("0123456789") !=
++              std::string::npos) {
++        return false;
++      }
++    }
 +  }
 +
 +  int width = 0;
@@ -367,7 +399,7 @@ index aedc5c6f5..194fb18c8 100644
  class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
   public:
    void SetDisabledMediaCodecs(
-@@ -171,6 +251,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
+@@ -171,6 +283,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
      }
      SbMediaSupportType type =
          SbMediaCanPlayMimeAndKeySystem(mime_type.c_str(), key_system.c_str());
