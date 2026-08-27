@@ -281,7 +281,7 @@ index aedc5c6f5..194fb18c8 100644
  #include "base/strings/string_split.h"
  #include "base/synchronization/waitable_event.h"
  #include "cobalt/media/base/format_support_query_metrics.h"
-@@ -91,6 +92,125 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
+@@ -91,6 +92,277 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
    return "";
  }
  
@@ -312,6 +312,145 @@ index aedc5c6f5..194fb18c8 100644
 +         base::StringToInt(string_value, value);
 +}
 +
++static bool ParseVp09Component(const std::string& component,
++                               int minimum,
++                               int maximum,
++                               int* value) {
++  if (component.size() != 2 ||
++      component.find_first_not_of("0123456789") != std::string::npos ||
++      !base::StringToInt(component, value)) {
++    return false;
++  }
++  return *value >= minimum && *value <= maximum;
++}
++
++static int64_t GetVp09MaximumLumaSampleRate(int level) {
++  switch (level) {
++    case 10:
++      return 829440;
++    case 11:
++      return 2764800;
++    case 20:
++      return 4608000;
++    case 21:
++      return 9216000;
++    case 30:
++      return 20736000;
++    case 31:
++      return 36864000;
++    case 40:
++      return 83558400;
++    case 41:
++      return 160432128;
++    case 50:
++      return 311951360;
++    case 51:
++      return 588251136;
++    case 52:
++      return 1176502272;
++    case 60:
++      return 1176502272;
++    case 61:
++      return 2353004544LL;
++    case 62:
++      return 4706010000LL;
++    default:
++      return 0;
++  }
++}
++
++static int64_t GetVp09MaximumPictureSize(int level) {
++  switch (level) {
++    case 10:
++      return 36864;
++    case 11:
++      return 73728;
++    case 20:
++      return 122880;
++    case 21:
++      return 245760;
++    case 30:
++      return 552960;
++    case 31:
++      return 983040;
++    case 40:
++    case 41:
++      return 2228224;
++    case 50:
++    case 51:
++    case 52:
++      return 8912896;
++    case 60:
++    case 61:
++    case 62:
++      return 35651584;
++    default:
++      return 0;
++  }
++}
++
++static int GetVp09MaximumDimension(int level) {
++  if (level >= 60) return 16832;
++  if (level >= 50) return 8384;
++  if (level >= 40) return 4160;
++  if (level >= 31) return 2752;
++  if (level >= 30) return 2048;
++  if (level >= 21) return 1344;
++  if (level >= 20) return 960;
++  if (level >= 11) return 768;
++  if (level >= 10) return 512;
++  return 0;
++}
++
++static int64_t GetVp09MaximumBitrate(int level) {
++  switch (level) {
++    case 10:
++      return 200000;
++    case 11:
++      return 800000;
++    case 20:
++      return 1800000;
++    case 21:
++      return 3600000;
++    case 30:
++      return 7200000;
++    case 31:
++      return 12000000;
++    case 40:
++      return 18000000;
++    case 41:
++      return 30000000;
++    case 50:
++      return 60000000;
++    case 51:
++      return 120000000;
++    case 52:
++    case 60:
++      return 180000000;
++    case 61:
++      return 240000000;
++    case 62:
++      return 480000000;
++    default:
++      return 0;
++  }
++}
++
++static bool IsVp09LevelSufficient(int level,
++                                  int width,
++                                  int height,
++                                  int frame_rate,
++                                  int bitrate) {
++  const int64_t picture_size = static_cast<int64_t>(width) * height;
++  const int64_t luma_sample_rate = picture_size * frame_rate;
++  const int maximum_dimension = GetVp09MaximumDimension(level);
++  return maximum_dimension > 0 && width <= maximum_dimension &&
++         height <= maximum_dimension &&
++         picture_size <= GetVp09MaximumPictureSize(level) &&
++         luma_sample_rate <= GetVp09MaximumLumaSampleRate(level) &&
++         bitrate <= GetVp09MaximumBitrate(level);
++}
++
 +static bool IsExplicitVp9SdrUhdQuery(const std::string& mime_type) {
 +  const std::vector<std::string> mime_components = base::SplitString(
 +      mime_type, ";", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
@@ -325,6 +464,8 @@ index aedc5c6f5..194fb18c8 100644
 +  }
 +
 +  const std::string& codec = codecs[0];
++  int vp09_level = 0;
++  const bool has_structured_vp09_codec = codec != "vp9" && codec != "vp09";
 +  if (codec != "vp9" && codec != "vp09") {
 +    const std::vector<std::string> codec_parts = base::SplitString(
 +        codec, ".", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
@@ -342,23 +483,30 @@ index aedc5c6f5..194fb18c8 100644
 +
 +    const std::string& level = codec_parts[2];
 +    const std::string& bit_depth = codec_parts[3];
-+    if (level.size() != 2 ||
-+        level.find_first_not_of("0123456789") != std::string::npos ||
-+        bit_depth.size() != 2 ||
-+        bit_depth.find_first_not_of("0123456789") != std::string::npos ||
++    int bit_depth_value = 0;
++    if (!ParseVp09Component(level, 0, 62, &vp09_level) ||
++        !ParseVp09Component(bit_depth, 8, 8, &bit_depth_value) ||
 +        (level != "10" && level != "11" && level != "20" &&
 +         level != "21" && level != "30" && level != "31" &&
 +         level != "40" && level != "41" && level != "50" &&
 +         level != "51" && level != "52" && level != "60" &&
-+         level != "61" && level != "62") ||
-+        bit_depth != "08") {
++         level != "61" && level != "62")) {
 +      return false;
 +    }
 +
-+    for (size_t index = 4; index < codec_parts.size(); ++index) {
-+      if (codec_parts[index].size() != 2 ||
-+          codec_parts[index].find_first_not_of("0123456789") !=
-+              std::string::npos) {
++    if (codec_parts.size() > 4) {
++      int component = 0;
++      if (!ParseVp09Component(codec_parts[4], 0, 1, &component) ||
++          !ParseVp09Component(codec_parts[5], 1, 12, &component) ||
++          !ParseVp09Component(codec_parts[6], 0, 18, &component) ||
++          !ParseVp09Component(codec_parts[7], 0, 11, &component)) {
++        return false;
++      }
++    }
++
++    if (codec_parts.size() == 10) {
++      int color_range = 0;
++      if (!ParseVp09Component(codec_parts[8], 0, 1, &color_range)) {
 +        return false;
 +      }
 +    }
@@ -380,6 +528,10 @@ index aedc5c6f5..194fb18c8 100644
 +      (width == 3840 && height == 2160);
 +  if (!is_supported_resolution || frame_rate <= 0 || frame_rate > 60 ||
 +      bitrate <= 0 || bitrate > 60000000) {
++    return false;
++  }
++  if (has_structured_vp09_codec &&
++      !IsVp09LevelSufficient(vp09_level, width, height, frame_rate, bitrate)) {
 +    return false;
 +  }
 +
@@ -407,7 +559,7 @@ index aedc5c6f5..194fb18c8 100644
  class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
   public:
    void SetDisabledMediaCodecs(
-@@ -171,6 +291,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
+@@ -171,6 +442,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
      }
      SbMediaSupportType type =
          SbMediaCanPlayMimeAndKeySystem(mime_type.c_str(), key_system.c_str());
