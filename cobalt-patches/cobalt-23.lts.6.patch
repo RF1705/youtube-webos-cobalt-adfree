@@ -281,7 +281,7 @@ index aedc5c6f5..194fb18c8 100644
  #include "base/strings/string_split.h"
  #include "base/synchronization/waitable_event.h"
  #include "cobalt/media/base/format_support_query_metrics.h"
-@@ -91,6 +92,123 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
+@@ -91,6 +92,125 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
    return "";
  }
  
@@ -313,7 +313,9 @@ index aedc5c6f5..194fb18c8 100644
 +}
 +
 +static bool IsExplicitVp9SdrUhdQuery(const std::string& mime_type) {
-+  if (mime_type.find("video/") != 0) {
++  const std::vector<std::string> mime_components = base::SplitString(
++      mime_type, ";", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++  if (mime_components.empty() || mime_components[0] != "video/webm") {
 +    return false;
 +  }
 +
@@ -349,7 +351,7 @@ index aedc5c6f5..194fb18c8 100644
 +         level != "40" && level != "41" && level != "50" &&
 +         level != "51" && level != "52" && level != "60" &&
 +         level != "61" && level != "62") ||
-+        (bit_depth != "08" && bit_depth != "10" && bit_depth != "12")) {
++        bit_depth != "08") {
 +      return false;
 +    }
 +
@@ -405,7 +407,7 @@ index aedc5c6f5..194fb18c8 100644
  class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
   public:
    void SetDisabledMediaCodecs(
-@@ -171,6 +289,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
+@@ -171,6 +291,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
      }
      SbMediaSupportType type =
          SbMediaCanPlayMimeAndKeySystem(mime_type.c_str(), key_system.c_str());
