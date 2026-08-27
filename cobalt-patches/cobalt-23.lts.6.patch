@@ -281,7 +281,7 @@ index aedc5c6f5..194fb18c8 100644
  #include "base/strings/string_split.h"
  #include "base/synchronization/waitable_event.h"
  #include "cobalt/media/base/format_support_query_metrics.h"
-@@ -91,6 +92,277 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
+@@ -91,6 +92,282 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
    return "";
  }
  
@@ -465,6 +465,7 @@ index aedc5c6f5..194fb18c8 100644
 +
 +  const std::string& codec = codecs[0];
 +  int vp09_level = 0;
++  int vp09_transfer = 1;
 +  const bool has_structured_vp09_codec = codec != "vp9" && codec != "vp09";
 +  if (codec != "vp9" && codec != "vp09") {
 +    const std::vector<std::string> codec_parts = base::SplitString(
@@ -498,8 +499,11 @@ index aedc5c6f5..194fb18c8 100644
 +      int component = 0;
 +      if (!ParseVp09Component(codec_parts[4], 0, 1, &component) ||
 +          !ParseVp09Component(codec_parts[5], 1, 12, &component) ||
-+          !ParseVp09Component(codec_parts[6], 0, 18, &component) ||
++          !ParseVp09Component(codec_parts[6], 0, 18, &vp09_transfer) ||
 +          !ParseVp09Component(codec_parts[7], 0, 11, &component)) {
++        return false;
++      }
++      if (vp09_transfer != 1) {
 +        return false;
 +      }
 +    }
@@ -536,8 +540,9 @@ index aedc5c6f5..194fb18c8 100644
 +  }
 +
 +  std::string eotf;
-+  return !ExtractMimeTypeParameter(mime_type, "eotf", &eotf) ||
-+         eotf == "bt709";
++  return (!has_structured_vp09_codec || vp09_transfer == 1) &&
++         (!ExtractMimeTypeParameter(mime_type, "eotf", &eotf) ||
++          eotf == "bt709");
 +}
 +
 +static bool Has4kVideoOutput() {
@@ -559,7 +564,7 @@ index aedc5c6f5..194fb18c8 100644
  class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
   public:
    void SetDisabledMediaCodecs(
-@@ -171,6 +442,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
+@@ -171,6 +449,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
      }
      SbMediaSupportType type =
          SbMediaCanPlayMimeAndKeySystem(mime_type.c_str(), key_system.c_str());
