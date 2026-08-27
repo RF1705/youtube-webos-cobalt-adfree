@@ -469,8 +469,8 @@ index aedc5c6f5..194fb18c8 100644
 +  if (codec != "vp9" && codec != "vp09") {
 +    const std::vector<std::string> codec_parts = base::SplitString(
 +        codec, ".", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
-+    if ((codec_parts.size() != 4 && codec_parts.size() != 9 &&
-+         codec_parts.size() != 10) ||
++    if ((codec_parts.size() != 4 && codec_parts.size() != 8 &&
++         codec_parts.size() != 9) ||
 +        codec_parts[0] != "vp09" || codec_parts[1] != "00") {
 +      return false;
 +    }
@@ -504,7 +504,7 @@ index aedc5c6f5..194fb18c8 100644
 +      }
 +    }
 +
-+    if (codec_parts.size() == 10) {
++    if (codec_parts.size() == 9) {
 +      int color_range = 0;
 +      if (!ParseVp09Component(codec_parts[8], 0, 1, &color_range)) {
 +        return false;
