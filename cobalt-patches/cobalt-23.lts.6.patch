@@ -281,7 +281,7 @@ index aedc5c6f5..194fb18c8 100644
  #include "base/strings/string_split.h"
  #include "base/synchronization/waitable_event.h"
  #include "cobalt/media/base/format_support_query_metrics.h"
-@@ -91,6 +92,282 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
+@@ -91,6 +92,294 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
    return "";
  }
  
@@ -322,6 +322,14 @@ index aedc5c6f5..194fb18c8 100644
 +    return false;
 +  }
 +  return *value >= minimum && *value <= maximum;
++}
++
++static bool IsVp09ColorPrimaries(int value) {
++  return value == 1 || value == 2 || (value >= 4 && value <= 12);
++}
++
++static bool IsVp09MatrixCoefficients(int value) {
++  return (value >= 0 && value <= 2) || (value >= 4 && value <= 11);
 +}
 +
 +static int64_t GetVp09MaximumLumaSampleRate(int level) {
@@ -497,10 +505,14 @@ index aedc5c6f5..194fb18c8 100644
 +
 +    if (codec_parts.size() > 4) {
 +      int component = 0;
++      int color_primaries = 0;
++      int matrix_coefficients = 0;
 +      if (!ParseVp09Component(codec_parts[4], 0, 1, &component) ||
-+          !ParseVp09Component(codec_parts[5], 1, 12, &component) ||
++          !ParseVp09Component(codec_parts[5], 1, 12, &color_primaries) ||
 +          !ParseVp09Component(codec_parts[6], 0, 18, &vp09_transfer) ||
-+          !ParseVp09Component(codec_parts[7], 0, 11, &component)) {
++          !ParseVp09Component(codec_parts[7], 0, 11, &matrix_coefficients) ||
++          !IsVp09ColorPrimaries(color_primaries) ||
++          !IsVp09MatrixCoefficients(matrix_coefficients)) {
 +        return false;
 +      }
 +      if (vp09_transfer != 1) {
@@ -564,7 +576,7 @@ index aedc5c6f5..194fb18c8 100644
  class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
   public:
    void SetDisabledMediaCodecs(
-@@ -171,6 +449,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
+@@ -171,6 +456,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
      }
      SbMediaSupportType type =
          SbMediaCanPlayMimeAndKeySystem(mime_type.c_str(), key_system.c_str());
