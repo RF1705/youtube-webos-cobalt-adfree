@@ -52,7 +52,7 @@ speeds range from 0.25× to 2×.
 * Required tools:
 
 ```sh
-sudo apt install jq git sed binutils squashfs-tools rename findutils xz-utils
+sudo apt install jq git sed binutils squashfs-tools rename findutils xz-utils lz4
 ```
 
 The standard patched app uses `youtube.leanback.v4` and therefore replaces the
@@ -277,6 +277,10 @@ Patch your official YouTube IPK:
 ```sh
 make package PACKAGE=./your-tv-youtube.ipk
 ```
+
+For source packages with `libcobalt.lz4`, the build replaces that file and adds
+the content-size metadata required by newer LG loaders. The replacement Cobalt
+runtime must match the starter's Starboard API.
 
 For maintainers, a plain `make` builds the current standard package from the
 private `youtube-official-1.1.5.tar.gz` base and the tested
