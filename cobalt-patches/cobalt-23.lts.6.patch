@@ -281,7 +281,7 @@ index aedc5c6f5..194fb18c8 100644
  #include "base/strings/string_split.h"
  #include "base/synchronization/waitable_event.h"
  #include "cobalt/media/base/format_support_query_metrics.h"
-@@ -91,6 +92,309 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
+@@ -91,6 +92,312 @@ static std::string ExtractEncryptionScheme(const std::string& key_system) {
    return "";
  }
  
@@ -487,6 +487,9 @@ index aedc5c6f5..194fb18c8 100644
 +  }
 +
 +  const std::string& codec = codecs[0];
++  if (codec.find_first_of(" \t\r\n") != std::string::npos) {
++    return false;
++  }
 +  int vp09_level = 0;
 +  int vp09_transfer = 1;
 +  const bool has_structured_vp09_codec = codec != "vp9" && codec != "vp09";
@@ -591,7 +594,7 @@ index aedc5c6f5..194fb18c8 100644
  class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
   public:
    void SetDisabledMediaCodecs(
-@@ -171,6 +461,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
+@@ -171,6 +467,17 @@ class CanPlayTypeHandlerStarboard : public CanPlayTypeHandler {
      }
      SbMediaSupportType type =
          SbMediaCanPlayMimeAndKeySystem(mime_type.c_str(), key_system.c_str());
