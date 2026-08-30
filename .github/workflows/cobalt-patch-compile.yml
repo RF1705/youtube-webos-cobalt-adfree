@@ -96,7 +96,20 @@ jobs:
           test -s cobalt-bin/23.lts.6-13/content/web/adblock/adblockPreload.js
           test -s cobalt-bin/23.lts.6-13/content/web/adblock/adblockMain.js
 
-      - name: Upload Cobalt runtime
+      - name: Archive patched Cobalt runtime
+        run: |
+          make cobalt-bin/23.lts.6-13.xz
+          test -s cobalt-bin/23.lts.6-13.xz
+
+      - name: Upload Cobalt runtime archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobalt-23.lts.6-sb13-runtime
+          path: cobalt-bin/23.lts.6-13.xz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Cobalt runtime files
         uses: actions/upload-artifact@v4
         with:
           name: cobalt-23.lts.6-sb13-preload-test
