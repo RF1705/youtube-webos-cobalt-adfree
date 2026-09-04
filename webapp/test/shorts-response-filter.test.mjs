@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   isBrowseResponse,
+  isGuideResponse,
   isShortsPath,
   stripShortsFromBrowseResponse
 } from '../src/shorts-response-filter.mjs';
@@ -114,6 +115,7 @@ test('does not classify direct player responses as browse responses', () => {
   };
 
   assert.equal(isBrowseResponse(playerResponse), false);
+  assert.equal(isGuideResponse(playerResponse), false);
 });
 
 test('removes FEshorts navigation entries but keeps ordinary browse entries', () => {
@@ -140,4 +142,52 @@ test('removes FEshorts navigation entries but keeps ordinary browse entries', ()
       }
     }
   ]);
+});
+
+test('removes Shorts from the YouTube TV guide before navigation renders', () => {
+  const response = {
+    items: [
+      {
+        guideSectionRenderer: {
+          items: [
+            {
+              guideEntryRenderer: {
+                title: { simpleText: 'Home' },
+                navigationEndpoint: {
+                  browseEndpoint: { browseId: 'FEwhat_to_watch' }
+                }
+              }
+            },
+            {
+              guideEntryRenderer: {
+                title: { simpleText: 'Shorts' },
+                navigationEndpoint: {
+                  browseEndpoint: { browseId: 'FEshorts' }
+                }
+              }
+            },
+            {
+              guideEntryRenderer: {
+                title: { simpleText: 'Subscriptions' },
+                navigationEndpoint: {
+                  browseEndpoint: { browseId: 'FEsubscriptions' }
+                }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  };
+
+  assert.equal(isBrowseResponse(response), false);
+  assert.equal(isGuideResponse(response), true);
+  assert.equal(stripShortsFromBrowseResponse(response), true);
+
+  const items = response.items[0].guideSectionRenderer.items;
+  assert.equal(items.length, 2);
+  assert.deepEqual(
+    items.map((item) => item.guideEntryRenderer.navigationEndpoint.browseEndpoint.browseId),
+    ['FEwhat_to_watch', 'FEsubscriptions']
+  );
 });
