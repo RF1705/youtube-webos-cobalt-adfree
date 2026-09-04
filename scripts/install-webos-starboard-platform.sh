@@ -24,7 +24,6 @@ external_video_seek_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-webos-exte
 external_video_controls_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-webos-external-video-controls.patch"
 lifecycle_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-webos-lifecycle.patch"
 demuxer_stop_race_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-demuxer-stop-race.patch"
-ytaf_preload_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-ytaf-preload.patch"
 
 if [[ ! -d "$cobalt_root/.git" || ! -f "$platforms_file" ]]; then
   echo "Not a Cobalt source tree: $cobalt_root" >&2
@@ -34,30 +33,6 @@ fi
 if [[ "$(git -C "$cobalt_root" describe --tags --always)" != 23.lts.6* ]]; then
   echo "This overlay currently supports Cobalt 23.lts.6 only." >&2
   exit 3
-fi
-
-adblock_content_build="$cobalt_root/cobalt/adblock/content/BUILD.gn"
-web_module="$cobalt_root/cobalt/browser/web_module.cc"
-if [[ ! -f "$adblock_content_build" || ! -f "$web_module" ]]; then
-  echo "Cobalt source is missing the base YTAF patch: $cobalt_root" >&2
-  echo "Prepare the Cobalt checkout with cobalt-patches/cobalt-23.lts.6.patch first." >&2
-  exit 4
-fi
-
-has_preload_asset=0
-has_preload_hook=0
-grep -q '"adblockPreload.js"' "$adblock_content_build" && has_preload_asset=1
-grep -q 'ReadYtafPreloadScript' "$web_module" && has_preload_hook=1
-
-if [[ "$has_preload_asset" != "$has_preload_hook" ]]; then
-  echo "Partial YTAF preload patch detected in Cobalt source: $cobalt_root" >&2
-  echo "Reset the partial preload change before rebuilding." >&2
-  exit 5
-fi
-
-if [[ "$has_preload_hook" == "0" ]]; then
-  git -C "$cobalt_root" apply --check "$ytaf_preload_patch"
-  git -C "$cobalt_root" apply "$ytaf_preload_patch"
 fi
 
 mkdir -p "$platform_target"
