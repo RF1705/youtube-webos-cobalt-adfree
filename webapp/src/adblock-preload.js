@@ -1,6 +1,7 @@
 import { configRead } from './config.js';
 import {
   isBrowseResponse,
+  isGuideResponse,
   stripShortsFromBrowseResponse
 } from './shorts-response-filter.mjs';
 
@@ -35,10 +36,10 @@ if (!window.__ytafPreloadExecuted) {
 
         if (
           !shortsEnabled &&
-          isBrowseResponse(value) &&
+          (isBrowseResponse(value) || isGuideResponse(value)) &&
           stripShortsFromBrowseResponse(value)
         ) {
-          console.log('[ytaf preload] Shorts blocker removed browse renderers');
+          console.log('[ytaf preload] Shorts blocker removed response entries');
         }
 
         return value;
