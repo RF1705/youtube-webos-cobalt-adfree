@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   isBrowseResponse,
+  isGuideResponse,
   isShortsPath,
   stripShortsFromBrowseResponse
 } from '../src/shorts-response-filter.mjs';
@@ -114,6 +115,7 @@ test('does not classify direct player responses as browse responses', () => {
   };
 
   assert.equal(isBrowseResponse(playerResponse), false);
+  assert.equal(isGuideResponse(playerResponse), false);
 });
 
 test('removes FEshorts navigation entries but keeps ordinary browse entries', () => {
@@ -140,4 +142,64 @@ test('removes FEshorts navigation entries but keeps ordinary browse entries', ()
       }
     }
   ]);
+});
+
+test('removes Shorts from the YouTube TV guide before navigation renders', () => {
+  const response = {
+    items: [
+      {
+        guideSectionRenderer: {
+          items: [
+            {
+              guideEntryRenderer: {
+                navigationEndpoint: {
+                  browseEndpoint: { browseId: 'FEtopics' }
+                },
+                icon: { iconType: 'WHAT_TO_WATCH' },
+                formattedTitle: { simpleText: 'Startseite' }
+              }
+            },
+            {
+              guideEntryRenderer: {
+                navigationEndpoint: {
+                  reelWatchEndpoint: {
+                    overlay: {
+                      reelPlayerOverlayRenderer: {
+                        style: 'REEL_PLAYER_OVERLAY_STYLE_SHORTS'
+                      }
+                    },
+                    watchEndpointSource:
+                      'REEL_WATCH_ENDPOINT_SOURCE_SHORTS_PIVOT_BAR',
+                    videoType: 'REEL_VIDEO_TYPE_VIDEO'
+                  }
+                },
+                icon: { iconType: 'YOUTUBE_SHORTS_FILL_24' },
+                formattedTitle: { simpleText: 'Shorts' }
+              }
+            },
+            {
+              guideEntryRenderer: {
+                navigationEndpoint: {
+                  browseEndpoint: { browseId: 'FEsubscriptions' }
+                },
+                icon: { iconType: 'SUBSCRIPTIONS' },
+                formattedTitle: { simpleText: 'Abos' }
+              }
+            }
+          ]
+        }
+      }
+    ]
+  };
+
+  assert.equal(isBrowseResponse(response), false);
+  assert.equal(isGuideResponse(response), true);
+  assert.equal(stripShortsFromBrowseResponse(response), true);
+
+  const items = response.items[0].guideSectionRenderer.items;
+  assert.equal(items.length, 2);
+  assert.deepEqual(
+    items.map((item) => item.guideEntryRenderer.icon.iconType),
+    ['WHAT_TO_WATCH', 'SUBSCRIPTIONS']
+  );
 });
