@@ -29,6 +29,7 @@ function getShortsLinkNode(value) {
 
   const endpoints = [
     value.navigationEndpoint,
+    value.guideEntryRenderer?.navigationEndpoint,
     value.onSelectCommand,
     value.command,
     value.tileRenderer?.onSelectCommand,
