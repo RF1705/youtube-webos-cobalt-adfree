@@ -11,9 +11,7 @@ build_dir="${SDL2_BUILD_DIR:-$repo_root/workdir/deps/SDL-webOS-$sdl_version-buil
 bundle_dir="${SDL2_BUNDLE_DIR:-$repo_root/workdir/deps/SDL2-$sdl_version-webos-abi}"
 patch_file="$repo_root/cobalt-platform/SDL-webOS-2.30.12-relaunch-sigcont.patch"
 parallel="${SDL2_BUILD_PARALLEL:-${NINJA_PARALLEL:-4}}"
-base_docker_image="${COBALT_BUILD_DOCKER_IMAGE:-cobalt-build-evergreen:latest}"
-docker_image="${SDL2_BUILD_DOCKER_IMAGE:-ytaf-sdl-build:latest}"
-dockerfile="$repo_root/cobalt-platform/Dockerfile.sdl-build"
+docker_image="${COBALT_BUILD_DOCKER_IMAGE:-cobalt-build-evergreen:latest}"
 force_rebuild="${SDL2_FORCE_REBUILD:-0}"
 stamp_file="$bundle_dir/.ytaf-sdl-build"
 
@@ -69,25 +67,6 @@ if ! docker volume inspect "$sdk_volume" >/dev/null 2>&1; then
   exit 3
 fi
 toolchain_file="/sdk/arm-webos-linux-gnueabi_sdk-buildroot/share/buildroot/toolchainfile.cmake"
-
-if [[ -z "${SDL2_BUILD_DOCKER_IMAGE:-}" ]]; then
-  if [[ ! -f "$dockerfile" ]]; then
-    echo "Missing SDL helper Dockerfile: $dockerfile" >&2
-    exit 3
-  fi
-  echo "Preparing CMake-enabled SDL build image from $base_docker_image"
-  docker build --platform linux/amd64 \
-    --build-arg "BASE_IMAGE=$base_docker_image" \
-    -t "$docker_image" \
-    -f "$dockerfile" \
-    "$repo_root/cobalt-platform"
-fi
-
-if ! docker run --rm --platform linux/amd64 "$docker_image" \
-  sh -lc 'command -v cmake >/dev/null && command -v ninja >/dev/null'; then
-  echo "SDL build image is missing cmake or ninja: $docker_image" >&2
-  exit 3
-fi
 
 mkdir -p "$(dirname "$source_dir")"
 
