@@ -32,16 +32,12 @@ fi
 echo "Building YTAF web assets."
 make -C "$repo_root" docker-make.npm
 
-for asset in adblockPreload.js adblockMain.js adblockMain.css; do
-  if [[ ! -s "$repo_root/webapp/output/$asset" ]]; then
-    echo "Missing YTAF web asset: $repo_root/webapp/output/$asset" >&2
-    exit 5
-  fi
-done
-
+# Apply the normal YTAF Cobalt patch and the isolated early-preload extension
+# before installing the starterless platform patches. This keeps a fresh Cobalt
+# checkout reproducible and avoids applying the base patch over Starfish/UHD
+# source changes afterwards.
+"$repo_root/scripts/install-ytaf-cobalt-assets.sh" "$cobalt_root"
 "$repo_root/scripts/install-webos-starboard-platform.sh" "$cobalt_root"
-mkdir -p "$cobalt_root/cobalt/adblock/content"
-cp -R "$repo_root/webapp/output/." "$cobalt_root/cobalt/adblock/content/"
 mkdir -p "$(dirname "$build_log")"
 
 echo "Starting the long Cobalt webos-arm build with $parallel jobs."
