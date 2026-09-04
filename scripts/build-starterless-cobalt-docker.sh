@@ -29,7 +29,19 @@ if [[ ! -d "$sdl_root/include/SDL2" || ! -f "$sdl_root/lib/libSDL2.a" ]]; then
   exit 2
 fi
 
+echo "Building YTAF web assets."
+make -C "$repo_root" docker-make.npm
+
+for asset in adblockPreload.js adblockMain.js adblockMain.css; do
+  if [[ ! -s "$repo_root/webapp/output/$asset" ]]; then
+    echo "Missing YTAF web asset: $repo_root/webapp/output/$asset" >&2
+    exit 5
+  fi
+done
+
 "$repo_root/scripts/install-webos-starboard-platform.sh" "$cobalt_root"
+mkdir -p "$cobalt_root/cobalt/adblock/content"
+cp -R "$repo_root/webapp/output/." "$cobalt_root/cobalt/adblock/content/"
 mkdir -p "$(dirname "$build_log")"
 
 echo "Starting the long Cobalt webos-arm build with $parallel jobs."
