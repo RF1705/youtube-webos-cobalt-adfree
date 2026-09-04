@@ -152,26 +152,38 @@ test('removes Shorts from the YouTube TV guide before navigation renders', () =>
           items: [
             {
               guideEntryRenderer: {
-                title: { simpleText: 'Home' },
                 navigationEndpoint: {
-                  browseEndpoint: { browseId: 'FEwhat_to_watch' }
-                }
+                  browseEndpoint: { browseId: 'FEtopics' }
+                },
+                icon: { iconType: 'WHAT_TO_WATCH' },
+                formattedTitle: { simpleText: 'Startseite' }
               }
             },
             {
               guideEntryRenderer: {
-                title: { simpleText: 'Shorts' },
                 navigationEndpoint: {
-                  browseEndpoint: { browseId: 'FEshorts' }
-                }
+                  reelWatchEndpoint: {
+                    overlay: {
+                      reelPlayerOverlayRenderer: {
+                        style: 'REEL_PLAYER_OVERLAY_STYLE_SHORTS'
+                      }
+                    },
+                    watchEndpointSource:
+                      'REEL_WATCH_ENDPOINT_SOURCE_SHORTS_PIVOT_BAR',
+                    videoType: 'REEL_VIDEO_TYPE_VIDEO'
+                  }
+                },
+                icon: { iconType: 'YOUTUBE_SHORTS_FILL_24' },
+                formattedTitle: { simpleText: 'Shorts' }
               }
             },
             {
               guideEntryRenderer: {
-                title: { simpleText: 'Subscriptions' },
                 navigationEndpoint: {
                   browseEndpoint: { browseId: 'FEsubscriptions' }
-                }
+                },
+                icon: { iconType: 'SUBSCRIPTIONS' },
+                formattedTitle: { simpleText: 'Abos' }
               }
             }
           ]
@@ -187,7 +199,7 @@ test('removes Shorts from the YouTube TV guide before navigation renders', () =>
   const items = response.items[0].guideSectionRenderer.items;
   assert.equal(items.length, 2);
   assert.deepEqual(
-    items.map((item) => item.guideEntryRenderer.navigationEndpoint.browseEndpoint.browseId),
-    ['FEwhat_to_watch', 'FEsubscriptions']
+    items.map((item) => item.guideEntryRenderer.icon.iconType),
+    ['WHAT_TO_WATCH', 'SUBSCRIPTIONS']
   );
 });
