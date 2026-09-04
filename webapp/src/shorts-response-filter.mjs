@@ -7,6 +7,9 @@ const SHORTS_RESPONSE_KEYS = [
 
 const TV_SHORTS_SHELF_RENDERER_TYPE = 'TVHTML5_SHELF_RENDERER_TYPE_SHORTS';
 const TV_SHORTS_ICON_TYPE = 'YOUTUBE_SHORTS_FILL_24';
+const TV_SHORTS_GUIDE_SOURCE =
+  'REEL_WATCH_ENDPOINT_SOURCE_SHORTS_PIVOT_BAR';
+const TV_SHORTS_OVERLAY_STYLE = 'REEL_PLAYER_OVERLAY_STYLE_SHORTS';
 
 export function isShortsPath(value) {
   if (!value) return false;
@@ -55,6 +58,22 @@ function isTvShortsShelf(value) {
   );
 }
 
+function isTvShortsGuideEntry(value) {
+  if (!value || typeof value !== 'object') return false;
+
+  const entry = value.guideEntryRenderer;
+  if (!entry || typeof entry !== 'object') return false;
+
+  const reelWatchEndpoint = entry.navigationEndpoint?.reelWatchEndpoint;
+
+  return Boolean(
+    entry.icon?.iconType === TV_SHORTS_ICON_TYPE ||
+      reelWatchEndpoint?.watchEndpointSource === TV_SHORTS_GUIDE_SOURCE ||
+      reelWatchEndpoint?.overlay?.reelPlayerOverlayRenderer?.style ===
+        TV_SHORTS_OVERLAY_STYLE
+  );
+}
+
 function hasGuideRenderer(value, depth = 0) {
   if (!value || typeof value !== 'object' || depth > 6) return false;
 
@@ -86,6 +105,7 @@ export function isShortsResponseEntry(value) {
 
   return Boolean(
     isTvShortsShelf(value) ||
+      isTvShortsGuideEntry(value) ||
       SHORTS_RESPONSE_KEYS.some((key) =>
         Object.prototype.hasOwnProperty.call(value, key)
       ) ||
