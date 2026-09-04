@@ -40,6 +40,12 @@ bash "$repo_root/scripts/install-ytaf-cobalt-assets.sh" "$cobalt_root"
 "$repo_root/scripts/install-webos-starboard-platform.sh" "$cobalt_root"
 mkdir -p "$(dirname "$build_log")"
 
+# An incremental GN build can otherwise retain the copied web assets from an
+# older starterless build. Remove only that generated directory so Ninja must
+# recreate it from the current webapp/output without throwing away compiled
+# Cobalt objects.
+rm -rf "$cobalt_root/$out_dir/content/web/adblock"
+
 echo "Starting the long Cobalt webos-arm build with $parallel jobs."
 echo "Complete build log: $build_log"
 docker run --rm --platform linux/amd64 \
@@ -54,4 +60,32 @@ docker run --rm --platform linux/amd64 \
   sh -c "git config --global --add safe.directory /code && gn --script-executable=python3 gen '$out_dir' --args='target_platform=\"webos-arm\" build_type=\"$build_type\" target_cpu=\"arm\" sb_api_version=13 is_clang=false' && ninja -v -j '$parallel' -C '$out_dir' cobalt" \
   2>&1 | tee "$build_log"
 
-echo "Cobalt binary: $cobalt_root/$out_dir/cobalt"
+cobalt_binary="$cobalt_root/$out_dir/cobalt"
+adblock_output="$cobalt_root/$out_dir/content/web/adblock"
+
+if [[ ! -x "$cobalt_binary" ]]; then
+  echo "Starterless Cobalt binary was not produced: $cobalt_binary" >&2
+  exit 5
+fi
+if ! strings "$cobalt_binary" | grep -Fq '[YTAF] Executing early preload from'; then
+  echo "Starterless Cobalt binary does not contain the YTAF early preload hook." >&2
+  echo "Refusing to use a stale binary." >&2
+  exit 6
+fi
+for asset in adblockMain.js adblockMain.css adblockPreload.js; do
+  if [[ ! -s "$adblock_output/$asset" ]]; then
+    echo "Starterless Cobalt output is missing current web asset: $adblock_output/$asset" >&2
+    exit 7
+  fi
+done
+if ! grep -Fq '__shorts' "$adblock_output/adblockMain.js"; then
+  echo "Starterless adblockMain.js does not contain the Shorts UI." >&2
+  exit 8
+fi
+if ! grep -Fq '__ytafPreloadExecuted' "$adblock_output/adblockPreload.js"; then
+  echo "Starterless adblockPreload.js does not contain the early Shorts hook." >&2
+  exit 9
+fi
+
+echo "Verified current YTAF preload and Shorts assets in starterless output."
+echo "Cobalt binary: $cobalt_binary"
