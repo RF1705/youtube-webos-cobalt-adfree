@@ -1,30 +1,6 @@
 import { checkboxTools } from './checkboxTools.js';
 import { configRead, configWrite } from './config.js';
 import { text as languageText } from './languages/index.js';
-import {
-  isBrowseResponse,
-  stripShortsFromBrowseResponse
-} from './shorts-response-filter.mjs';
-
-function installResponseFilter() {
-  if (window.__ytafShortsResponseFilterInstalled) return;
-  window.__ytafShortsResponseFilterInstalled = true;
-
-  const previousParse = JSON.parse;
-  JSON.parse = function () {
-    const value = previousParse.apply(this, arguments);
-
-    if (
-      !configRead('enableShorts') &&
-      isBrowseResponse(value) &&
-      stripShortsFromBrowseResponse(value)
-    ) {
-      console.log('Shorts blocker removed browse renderers !');
-    }
-
-    return value;
-  };
-}
 
 export function userScriptStartShortsBlockUI() {
   const control = document.querySelector('#__shorts');
@@ -47,5 +23,3 @@ export function userScriptStartShortsBlockUI() {
     configWrite('enableShorts', !newState);
   });
 }
-
-installResponseFilter();
