@@ -18,20 +18,51 @@ if (!window.__ytafPreloadExecuted) {
   if (!window.__ytafShortsResponseFilterInstalled) {
     window.__ytafShortsResponseFilterInstalled = true;
 
-    const previousParse = JSON.parse;
-    JSON.parse = function () {
-      const value = previousParse.apply(this, arguments);
+    const descriptor = Object.getOwnPropertyDescriptor(JSON, 'parse');
+    const nativeParse = JSON.parse;
+    let downstreamParse = nativeParse;
+    let parsing = false;
 
-      if (
-        !shortsEnabled &&
-        isBrowseResponse(value) &&
-        stripShortsFromBrowseResponse(value)
-      ) {
-        console.log('[ytaf preload] Shorts blocker removed browse renderers');
+    function ytafParse() {
+      if (parsing) {
+        return nativeParse.apply(this, arguments);
       }
 
-      return value;
-    };
+      parsing = true;
+
+      try {
+        const value = downstreamParse.apply(this, arguments);
+
+        if (
+          !shortsEnabled &&
+          isBrowseResponse(value) &&
+          stripShortsFromBrowseResponse(value)
+        ) {
+          console.log('[ytaf preload] Shorts blocker removed browse renderers');
+        }
+
+        return value;
+      } finally {
+        parsing = false;
+      }
+    }
+
+    if (!descriptor || descriptor.configurable) {
+      Object.defineProperty(JSON, 'parse', {
+        configurable: true,
+        enumerable: descriptor ? descriptor.enumerable : false,
+        get() {
+          return ytafParse;
+        },
+        set(parser) {
+          if (typeof parser === 'function' && parser !== ytafParse) {
+            downstreamParse = parser;
+          }
+        }
+      });
+    } else {
+      JSON.parse = ytafParse;
+    }
   }
 
   console.info('[ytaf preload] Early hooks installed');
