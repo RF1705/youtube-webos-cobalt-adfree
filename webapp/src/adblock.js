@@ -1,6 +1,7 @@
 /* eslint no-redeclare: 0 */
 /* global fetch:writable */
 import { configRead } from './config';
+import { stripSponsoredQrCodePopups } from './sponsored-qr-code-block.mjs';
 import './adblock.css';
 
 const AD_RENDERER_SELECTOR = [
@@ -71,9 +72,7 @@ function processAddedNode(node) {
 function startAdSlotObserver() {
   if (adSlotObserver || !document.body) return;
 
-  document
-    .querySelectorAll(AD_RENDERER_SELECTOR)
-    .forEach(hideAdRenderer);
+  document.querySelectorAll(AD_RENDERER_SELECTOR).forEach(hideAdRenderer);
 
   adSlotObserver = new MutationObserver((mutations) => {
     mutations.forEach((mutation) => {
@@ -99,10 +98,7 @@ function stopAdSlotObserver() {
 
 function syncAdblockStyles() {
   const enabled = Boolean(configRead('enableAdBlock'));
-  document.documentElement.classList.toggle(
-    'ytaf-adblock-enabled',
-    enabled
-  );
+  document.documentElement.classList.toggle('ytaf-adblock-enabled', enabled);
 
   if (enabled) {
     startAdSlotObserver();
@@ -234,16 +230,20 @@ const origParse = JSON.parse;
 JSON.parse = function () {
   const r = origParse.apply(this, arguments);
 
-  if (!configRead('enableAdBlock')) {
-    return r;
+  if (configRead('enableAdBlock')) {
+    if (stripYouTubeAds(r)) {
+      console.log('Adblock Removed !');
+    }
+    if (stripAdditionalYouTubeAds(r)) {
+      console.log('Adblock Removed additional renderers !');
+    }
   }
 
-  if (stripYouTubeAds(r)) {
-    console.log('Adblock Removed !');
-  }
-
-  if (stripAdditionalYouTubeAds(r)) {
-    console.log('Adblock Removed additional renderers !');
+  if (
+    configRead('enableSponsoredQrCodeBlock') &&
+    stripSponsoredQrCodePopups(r)
+  ) {
+    console.log('Adblock Removed sponsored QR code popups !');
   }
 
   return r;

@@ -6,7 +6,7 @@ on:
       base_tag:
         description: Existing AdFree release used as the package base
         required: true
-        default: v1.2.1
+        default: v1.2.2
         type: string
       test_version:
         description: Numeric webOS version for the test package

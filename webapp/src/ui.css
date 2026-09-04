@@ -31,10 +31,14 @@
 }
 
 .ytaf-ui-container div.center {
+  position: relative;
+  z-index: 2;
   text-align: left;
   margin-bottom: 12px;
   padding-bottom: 12px;
+  background: #05080c;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 0 #05080c;
 }
 
 .ytaf-ui-container div.small {

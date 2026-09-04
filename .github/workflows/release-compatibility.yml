@@ -24,11 +24,15 @@ jobs:
         with:
           repository: webosbrew/dev-toolbox-cli
           latest: true
-          fileName: webosbrew-toolbox-*.deb
+          fileName: webosbrew-toolbox-*_amd64.deb
           out-file-path: toolbox
 
       - name: Install package verifier
-        run: sudo apt-get update && sudo apt-get install -y ./toolbox/webosbrew-toolbox-*.deb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ./toolbox/webosbrew-toolbox-fw-symbols_*_amd64.deb \
+            ./toolbox/webosbrew-toolbox-ipk-verify_*_amd64.deb
 
       - name: Download release IPK
         env:

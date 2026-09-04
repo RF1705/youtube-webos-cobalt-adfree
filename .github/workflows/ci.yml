@@ -56,3 +56,7 @@ jobs:
         run: |
           npm ci
           npm run build -- --env production --optimization-minimize
+
+      - name: Run webapp tests
+        working-directory: webapp
+        run: npm test

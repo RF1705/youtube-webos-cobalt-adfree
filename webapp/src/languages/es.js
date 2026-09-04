@@ -1,7 +1,7 @@
 export default {
   ui: {
     title: 'YouTube webOS Cobalt AdFree',
-    adblock: 'Bloquear anuncios', autoLogin: 'Omitir automáticamente la selección de cuenta', sponsorblock: 'Activar SponsorBlock', ryd: 'Mostrar recuento de no me gusta',
+    adblock: 'Bloquear anuncios', startupPage: 'Página de inicio', startupPageHome: 'Inicio', startupPageSubscriptions: 'Suscripciones', startupPageShorts: 'Shorts', startupPageLibrary: 'Biblioteca', autoLogin: 'Omitir automáticamente la selección de cuenta', sponsorblock: 'Activar SponsorBlock', ryd: 'Mostrar recuento de no me gusta', shorts: 'Bloquear YouTube Shorts',
     sponsor: 'Saltar segmentos patrocinados', intro: 'Saltar introducciones', outro: 'Saltar finales',
     interaction: 'Saltar recordatorios de suscripción y me gusta', selfpromo: 'Saltar autopromoción',
     musicOfftopic: 'Saltar música/fuera de tema', preview: 'Saltar avances/resúmenes',

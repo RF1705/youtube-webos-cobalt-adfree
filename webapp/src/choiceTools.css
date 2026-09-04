@@ -1,0 +1,38 @@
+.choice-wrapper {
+  cursor: pointer;
+  margin: 3px 0;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 34px;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.choice-wrapper.ytaf-focused {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(68, 204, 102, 0.82);
+  box-shadow: 0 0 0 2px rgba(68, 204, 102, 0.2);
+  transform: translateX(2px);
+}
+
+.choice-wrapper .desc {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.88rem;
+}
+
+.choice-wrapper .choice-value {
+  flex: 0 0 auto;
+  min-width: 120px;
+  padding: 5px 10px;
+  text-align: center;
+  color: #fff;
+  background: rgba(68, 204, 102, 0.22);
+  border: 1px solid rgba(68, 204, 102, 0.68);
+  border-radius: 5px;
+  font-size: 0.78rem;
+}

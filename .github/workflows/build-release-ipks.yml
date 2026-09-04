@@ -1,0 +1,384 @@
+name: Create release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example 1.2.2
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: create-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate release version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must use MAJOR.MINOR.PATCH, for example 1.2.2. Got: $VERSION" >&2
+            exit 1
+          fi
+
+          tag="v$VERSION"
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already exists." >&2
+            exit 1
+          fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists." >&2
+            exit 1
+          fi
+
+          current_version="$(sed -n 's/^PROJECT_VERSION?=//p' Makefile | head -n 1)"
+          if [[ -z "$current_version" ]]; then
+            echo "Could not determine current PROJECT_VERSION from Makefile." >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "current_version=$current_version" >> "$GITHUB_OUTPUT"
+
+          echo "Preparing $tag from current version $current_version"
+
+      - name: Check out private build images
+        uses: actions/checkout@v5
+        with:
+          repository: RF1705/YouTube-webos-images
+          ref: main
+          path: .private-images
+          token: ${{ secrets.PRIVATE_IMAGES_TOKEN }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            jq \
+            git \
+            sed \
+            binutils \
+            squashfs-tools \
+            rename \
+            findutils \
+            xz-utils \
+            python3
+
+      - name: Verify private build images
+        run: |
+          cd .private-images
+          sha256sum -c SHA256SUMS
+
+      - name: Fix Makefile build helpers
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('Makefile')
+          content = path.read_text()
+
+          old_mount = '-v "$PWD:/app"'
+          new_mount = '-v "$(CURRENT_DIR):/app"'
+          if old_mount in content:
+              content = content.replace(old_mount, new_mount, 1)
+          elif new_mount not in content:
+              raise SystemExit('Could not find docker-make source mount in Makefile')
+
+          old_ares = '$aresCmd -v -c $(WORKDIR)/ipk;'
+          new_ares = '$$aresCmd -v -c $(WORKDIR)/ipk;'
+          if old_ares in content:
+              content = content.replace(old_ares, new_ares, 1)
+          elif new_ares not in content:
+              raise SystemExit('Could not find ares-package command in Makefile')
+
+          path.write_text(content)
+          PY
+
+      - name: Prepare ARM strip helper image
+        run: |
+          docker build -t cobalt-build-evergreen:latest - <<'EOF'
+          FROM ubuntu:24.04
+          RUN apt-get update \
+              && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils-arm-linux-gnueabi \
+              && rm -rf /var/lib/apt/lists/*
+          EOF
+
+      - name: Build standard IPK
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          make package \
+            PROJECT_VERSION="$VERSION" \
+            PACKAGE=".private-images/ipks-official/youtube-official-1.1.5.tar.gz"
+
+      - name: Build PJTR IPK
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python3 scripts/verify-pjtr-starter.py \
+            ".private-images/starters/k7lp-pjtr/youtube-webos-stock-starter.tar"
+
+          make package \
+            PROJECT_VERSION="$VERSION" \
+            PACKAGE=".private-images/starters/k7lp-pjtr/youtube-webos-stock-starter.tar" \
+            PACKAGE_SOURCE_FORMAT=stock-starter \
+            PACKAGE_NAME_OFFICIAL="youtube.leanback.v4-pjtr" \
+            PACKAGE_NAME="youtube.leanback.v4-pjtr" \
+            PACKAGE_DISPLAY_NAME="YouTube webOS Cobalt AdFree PJTR" \
+            PACKAGE_COBALT_VERSION="23.lts.6" \
+            PACKAGE_SB_API_VERSION="12" \
+            PACKAGE_COBALT_ARCHIVE=".private-images/cobalt-bin/23.lts.6-12.xz"
+
+      - name: Generate release metadata
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CURRENT_VERSION: ${{ steps.version.outputs.current_version }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ['VERSION']
+          current = os.environ['CURRENT_VERSION']
+          tag = f'v{version}'
+
+          standard_name = f'youtube.leanback.v4_{version}_arm.ipk'
+          pjtr_name = f'youtube.leanback.v4-pjtr_{version}_arm.ipk'
+          standard_path = Path('output') / standard_name
+          pjtr_path = Path('output') / pjtr_name
+
+          for path in (standard_path, pjtr_path):
+              if not path.is_file():
+                  raise SystemExit(f'Missing release package: {path}')
+
+          def sha256(path):
+              digest = hashlib.sha256()
+              with path.open('rb') as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          standard_sha = sha256(standard_path)
+          pjtr_sha = sha256(pjtr_path)
+          standard_size = standard_path.stat().st_size
+
+          makefile = Path('Makefile')
+          make_text = makefile.read_text()
+          make_text, count = re.subn(
+              r'^PROJECT_VERSION\?=.*$',
+              f'PROJECT_VERSION?={version}',
+              make_text,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if count != 1:
+              raise SystemExit('Could not update PROJECT_VERSION in Makefile')
+          makefile.write_text(make_text)
+
+          readme = Path('README.md')
+          readme_text = readme.read_text()
+
+          readme_text, count = re.subn(
+              r'^## v\d+\.\d+\.\d+$',
+              f'## v{version}',
+              readme_text,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if count != 1:
+              raise SystemExit('Could not update current release heading in README')
+
+          readme_text, count = re.subn(
+              r'The standard v\d+\.\d+\.\d+ package uses the same Cobalt 23\.lts\.6 / Starboard 13',
+              f'The standard v{version} package uses the same Cobalt 23.lts.6 / Starboard 13',
+              readme_text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('Could not update current compatibility baseline in README')
+
+          readme_text = readme_text.replace(
+              f'youtube.leanback.v4_{current}_arm.ipk',
+              standard_name,
+          )
+          readme_text = readme_text.replace(
+              f'youtube.leanback.v4-pjtr_{current}_arm.ipk',
+              pjtr_name,
+          )
+          readme_text = readme_text.replace(
+              f'/releases/download/v{current}/',
+              f'/releases/download/{tag}/',
+          )
+          readme_text = readme_text.replace(
+              f'youtube.leanback.v4*_{current}_arm.ipk',
+              f'youtube.leanback.v4*_{version}_arm.ipk',
+          )
+
+          pjtr_hash_pattern = re.compile(
+              r'(### PJTR/k7lp compatibility package.*?\nSHA-256:\n\n```text\n)'
+              r'[0-9a-f]{64}'
+              r'(\n```)',
+              re.DOTALL,
+          )
+          readme_text, count = pjtr_hash_pattern.subn(
+              rf'\g<1>{pjtr_sha}\g<2>',
+              readme_text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('Could not update PJTR SHA-256 in README')
+
+          readme.write_text(readme_text)
+
+          manifest = {
+              'id': 'youtube.leanback.v4',
+              'version': version,
+              'type': 'native',
+              'title': 'YouTube Cobalt AdFree',
+              'iconUri': 'https://raw.githubusercontent.com/RF1705/youtube-webos-cobalt-adfree/main/assets/largeIcon.png',
+              'sourceUrl': 'https://github.com/RF1705/youtube-webos-cobalt-adfree',
+              'rootRequired': False,
+              'ipkUrl': standard_name,
+              'ipkHash': {'sha256': standard_sha},
+          }
+          Path('youtube.leanback.v4.manifest.json').write_text(
+              json.dumps(manifest, indent=2) + '\n'
+          )
+
+          repo = {
+              'packages': [
+                  {
+                      'id': 'youtube.leanback.v4',
+                      'title': 'YouTube Cobalt AdFree',
+                      'shortDescription': 'YouTube TV with ad blocking and SponsorBlock support.',
+                      'iconUri': 'https://raw.githubusercontent.com/RF1705/youtube-webos-cobalt-adfree/main/assets/largeIcon.png',
+                      'manifest': {
+                          **manifest,
+                          'ipkUrl': f'https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/{tag}/{standard_name}',
+                          'ipkSize': standard_size,
+                      },
+                  }
+              ]
+          }
+          Path('repo.json').write_text(json.dumps(repo, indent=2) + '\n')
+
+          print(f'Standard: {standard_name}')
+          print(f'SHA-256:  {standard_sha}')
+          print(f'Size:     {standard_size}')
+          print(f'PJTR:     {pjtr_name}')
+          print(f'SHA-256:  {pjtr_sha}')
+          PY
+
+      - name: Review generated release metadata
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          standard="output/youtube.leanback.v4_${VERSION}_arm.ipk"
+          pjtr="output/youtube.leanback.v4-pjtr_${VERSION}_arm.ipk"
+
+          test -f "$standard"
+          test -f "$pjtr"
+          jq -e --arg version "$VERSION" '.version == $version' youtube.leanback.v4.manifest.json
+          jq -e --arg version "$VERSION" '.packages[0].manifest.version == $version' repo.json
+          grep -F "PROJECT_VERSION?=$VERSION" Makefile
+          grep -F "## v$VERSION" README.md
+          sha256sum "$standard" "$pjtr"
+          git diff --check
+          git diff -- README.md Makefile repo.json youtube.leanback.v4.manifest.json
+
+      - name: Commit release metadata
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            README.md \
+            Makefile \
+            repo.json \
+            youtube.leanback.v4.manifest.json
+
+          git commit -m "Release v$VERSION"
+          git push origin HEAD:main
+
+      - name: Create and push release tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "$TAG"
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$TAG" \
+            --generate-notes \
+            --draft
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release upload "$TAG" \
+            "output/youtube.leanback.v4_${VERSION}_arm.ipk" \
+            "output/youtube.leanback.v4-pjtr_${VERSION}_arm.ipk" \
+            youtube.leanback.v4.manifest.json \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
+
+      - name: Keep release files as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.version.outputs.version }}
+          path: |
+            output/youtube.leanback.v4_${{ steps.version.outputs.version }}_arm.ipk
+            output/youtube.leanback.v4-pjtr_${{ steps.version.outputs.version }}_arm.ipk
+            youtube.leanback.v4.manifest.json
+            repo.json
+          if-no-files-found: error

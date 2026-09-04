@@ -131,6 +131,20 @@ function uncheck(name) {
   callbacks[sliceDiv.tabIndex]?.(false);
 }
 
+function setCallback(name, callback) {
+  if (!name) return false;
+
+  const sliceDiv = document.querySelector('#' + name);
+  if (!sliceDiv || sliceDiv.tabIndex <= 0) return false;
+
+  callbacks[sliceDiv.tabIndex] = (newState) => {
+    if (callback != null) {
+      callback(newState);
+    }
+  };
+  return true;
+}
+
 function remove(name) {
   if (!name) {
     return;
@@ -145,5 +159,6 @@ export const checkboxTools = {
   toggleCheck: toggleCheck,
   check: check,
   uncheck: uncheck,
+  setCallback: setCallback,
   remove: remove
 };

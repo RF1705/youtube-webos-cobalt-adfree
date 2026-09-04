@@ -1,0 +1,25 @@
+{
+  "playerOverlays": {
+    "playerOverlayRenderer": {
+      "timelyActionRenderers": [
+        {
+          "timelyActionRenderer": {
+            "type": "TIMELY_ACTION_TYPE_SHOPPING",
+            "title": "Shop this video"
+          }
+        },
+        {
+          "timelyActionRenderer": {
+            "type": "TIMELY_ACTION_TYPE_SURVEY",
+            "title": "Unrelated timed action"
+          }
+        },
+        {
+          "futureTimedActionRenderer": {
+            "type": "TIMELY_ACTION_TYPE_FUTURE"
+          }
+        }
+      ]
+    }
+  }
+}

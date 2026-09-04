@@ -7,6 +7,7 @@ import './ui.css';
 
 import { configRead, configWrite } from './config.js';
 import { checkboxTools } from './checkboxTools.js';
+import { choiceTools } from './choiceTools.js';
 import { text as languageText } from './languages/index.js';
 import { sponsorBlockCategoryColors } from './sponsorblock-categories.js';
 import {
@@ -31,6 +32,13 @@ export function userScriptStartUI() {
   const PLAYBACK_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
   let lastGreenKeyAt = 0;
   let currentFocusIndex = -1;
+  let menuScrollFrame = null;
+  let menuOffset = 0;
+  let menuContent = null;
+  let menuViewport = null;
+  let heldDirection = null;
+  let heldDirectionAt = 0;
+  let directionMoveFrame = null;
 
   function getDirectionFromEvent(evt) {
     const key = (evt.key || '').toLowerCase();
@@ -102,6 +110,44 @@ export function userScriptStartUI() {
     return true;
   }
 
+  function scrollMenuItemIntoView(item) {
+    if (!item || !menuContent || !menuViewport || !uiContainer.contains(item)) return;
+
+    // Cobalt resets an overflow container's scrollTop after programmatic focus.
+    // Keep the viewport fixed and move its inner panel instead.
+    uiContainer.scrollTop = 0;
+
+    const visibleMargin = 8;
+    const row = item.parentElement && uiContainer.contains(item.parentElement)
+      ? item.parentElement
+      : item;
+    const viewportRect = menuViewport.getBoundingClientRect();
+    const itemRect = row.getBoundingClientRect();
+    const visibleTop = viewportRect.top + visibleMargin;
+    const visibleBottom = viewportRect.bottom - visibleMargin;
+
+    if (itemRect.top < visibleTop) {
+      menuOffset += itemRect.top - visibleTop;
+    } else if (itemRect.bottom > visibleBottom) {
+      menuOffset += itemRect.bottom - visibleBottom;
+    }
+
+    const viewportHeight = Math.max(0, visibleBottom - visibleTop);
+    const maximumOffset = Math.max(0, menuContent.scrollHeight - viewportHeight);
+    menuOffset = Math.max(0, Math.min(maximumOffset, menuOffset));
+    menuContent.style.top = `${-menuOffset}px`;
+  }
+
+  function queueMenuItemScroll(item) {
+    if (menuScrollFrame !== null) {
+      window.cancelAnimationFrame(menuScrollFrame);
+    }
+    menuScrollFrame = window.requestAnimationFrame(() => {
+      menuScrollFrame = null;
+      scrollMenuItemIntoView(item);
+    });
+  }
+
   function moveFocus(dir) {
     const focusableItems = Array.from(
       uiContainer.querySelectorAll('[tabindex]')
@@ -128,8 +174,38 @@ export function userScriptStartUI() {
     const nextItem = focusableItems[currentFocusIndex];
     if (nextItem) {
       nextItem.focus();
+      queueMenuItemScroll(nextItem);
       lastTabIndex = nextItem.tabIndex;
     }
+  }
+
+  function queueDirectionMove(direction) {
+    if (directionMoveFrame !== null) return;
+
+    const focusBeforeEvent = document.activeElement;
+    directionMoveFrame = window.requestAnimationFrame(() => {
+      directionMoveFrame = null;
+      const focusAfterEvent = document.activeElement;
+
+      // Some Cobalt versions perform native spatial navigation before the
+      // cancelled key event settles. Accept that move instead of adding one.
+      if (
+        focusAfterEvent &&
+        focusAfterEvent !== focusBeforeEvent &&
+        uiContainer.contains(focusAfterEvent) &&
+        focusAfterEvent.tabIndex > 0
+      ) {
+        const focusableItems = Array.from(
+          uiContainer.querySelectorAll('[tabindex]')
+        ).filter((item) => item.tabIndex > 0);
+        currentFocusIndex = focusableItems.indexOf(focusAfterEvent);
+        lastTabIndex = focusAfterEvent.tabIndex;
+        queueMenuItemScroll(focusAfterEvent);
+        return;
+      }
+
+      moveFocus(direction);
+    });
   }
 
   const uiContainer = document.createElement('div');
@@ -139,9 +215,9 @@ export function userScriptStartUI() {
   uiContainer.setAttribute('tabindex', 0);
   uiContainer.addEventListener(
     'focus',
-    () => {
+    (event) => {
       console.info('uiContainer focused!');
-      const focusedElement = document.activeElement;
+      const focusedElement = event.target;
       if (
         focusedElement &&
         focusedElement !== uiContainer &&
@@ -149,6 +225,7 @@ export function userScriptStartUI() {
         focusedElement.tabIndex > 0
       ) {
         lastTabIndex = focusedElement.tabIndex;
+        queueMenuItemScroll(focusedElement);
       }
     },
     true
@@ -184,6 +261,20 @@ export function userScriptStartUI() {
     )
   );
   uiContainer.appendChild(
+    choiceTools.add(
+      '__startup_page',
+      text('startupPage'),
+      configRead('startupPage'),
+      [
+        { value: 'home', label: text('startupPageHome') },
+        { value: 'subscriptions', label: text('startupPageSubscriptions') },
+        { value: 'shorts', label: text('startupPageShorts') },
+        { value: 'library', label: text('startupPageLibrary') }
+      ],
+      callbackConfig('startupPage')
+    )
+  );
+  uiContainer.appendChild(
     checkboxTools.add(
       '__auto_login',
       text('autoLogin'),
@@ -197,6 +288,14 @@ export function userScriptStartUI() {
       text('ryd'),
       configRead('enableReturnYouTubeDislike'),
       callbackConfig('enableReturnYouTubeDislike')
+    )
+  );
+  uiContainer.appendChild(
+    checkboxTools.add(
+      '__shorts',
+      text('shorts'),
+      configRead('enableShorts'),
+      callbackConfig('enableShorts')
     )
   );
   uiContainer.appendChild(
@@ -293,6 +392,23 @@ export function userScriptStartUI() {
   );
   uiContainer.appendChild(sponsorBlock);
 
+  menuContent = document.createElement('div');
+  menuContent.classList.add('ytaf-ui-content');
+  menuContent.style.position = 'relative';
+  menuContent.style.top = '0';
+  while (uiContainer.children.length > 1) {
+    menuContent.appendChild(uiContainer.children[1]);
+  }
+  menuViewport = document.createElement('div');
+  menuViewport.classList.add('ytaf-ui-viewport');
+  menuViewport.style.position = 'relative';
+  menuViewport.style.overflow = 'hidden';
+  menuViewport.style.boxSizing = 'border-box';
+  menuViewport.style.paddingLeft = '4px';
+  menuViewport.style.paddingRight = '4px';
+  menuViewport.appendChild(menuContent);
+  uiContainer.appendChild(menuViewport);
+
   (document.body || document.documentElement).appendChild(uiContainer);
 
   let latestFocus = null;
@@ -338,15 +454,16 @@ export function userScriptStartUI() {
       bottom: 'auto',
       width: '720px',
       maxWidth: '80vw',
+      height: '80vh',
       maxHeight: '80vh',
       boxSizing: 'border-box',
-      overflow: 'auto',
+      overflow: 'hidden',
       zIndex: '2147483647',
       pointerEvents: 'auto',
       background: '#05080c',
       color: '#ffffff',
       border: '6px solid #37ff77',
-      borderRadius: '0',
+      borderRadius: '12px',
       padding: '24px',
       fontSize: '22px',
       lineHeight: '1.25',
@@ -354,6 +471,12 @@ export function userScriptStartUI() {
       animation: 'none',
       boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)'
     });
+
+    const viewportHeight = Math.max(
+      0,
+      uiContainer.clientHeight - 48 - divTitle.offsetHeight - 12
+    );
+    menuViewport.style.height = `${viewportHeight}px`;
   }
 
   function focusMenuItem(preferredTabIndex = lastTabIndex) {
@@ -372,6 +495,7 @@ export function userScriptStartUI() {
 
     if (target) {
       target.focus();
+      queueMenuItemScroll(target);
       currentFocusIndex = focusableItems.indexOf(target);
       if (target.tabIndex !== null && target.tabIndex > 0) {
         lastTabIndex = target.tabIndex;
@@ -391,6 +515,9 @@ export function userScriptStartUI() {
         : null;
     suspendSpatialNavigation();
     applyVisibleContainerStyles();
+    menuOffset = 0;
+    menuContent.style.top = '0';
+    uiContainer.scrollTop = 0;
 
     setTimeout(() => {
       focusMenuItem(1);
@@ -433,13 +560,22 @@ export function userScriptStartUI() {
 
   function closeContainer() {
     console.info('Container: Hiding!');
+    if (menuScrollFrame !== null) {
+      window.cancelAnimationFrame(menuScrollFrame);
+      menuScrollFrame = null;
+    }
     if (focusGuardFrame !== null) {
       window.cancelAnimationFrame(focusGuardFrame);
       focusGuardFrame = null;
     }
+    if (directionMoveFrame !== null) {
+      window.cancelAnimationFrame(directionMoveFrame);
+      directionMoveFrame = null;
+    }
     uiContainer.style.display = 'none';
     uiContainer.style.visibility = 'hidden';
     uiContainer.style.pointerEvents = 'none';
+    heldDirection = null;
     const menuFocus = document.activeElement;
     if (menuFocus && uiContainer.contains(menuFocus) && typeof menuFocus.blur === 'function') {
       menuFocus.blur();
@@ -465,6 +601,16 @@ export function userScriptStartUI() {
   const eventHandler = (evt) => {
     const menuOpen = isContainerOpen();
     const focusInsideMenu = menuOpen && menuHasFocus();
+    const eventDirection = menuOpen ? getDirectionFromEvent(evt) : null;
+
+    if (evt.type === 'keyup' && eventDirection) {
+      if (heldDirection === eventDirection) {
+        heldDirection = null;
+      }
+      evt.preventDefault();
+      evt.stopPropagation();
+      return false;
+    }
 
     if (evt.type === 'keydown' && menuOpen) {
       if (!focusInsideMenu) {
@@ -473,11 +619,20 @@ export function userScriptStartUI() {
         captureMenuFocus();
       }
 
-      const direction = getDirectionFromEvent(evt);
+      const direction = eventDirection;
       if (direction) {
         evt.preventDefault();
         evt.stopPropagation();
-        moveFocus(direction);
+        const now = Date.now();
+        if (
+          evt.repeat ||
+          (heldDirection === direction && now - heldDirectionAt < 400)
+        ) {
+          return false;
+        }
+        heldDirection = direction;
+        heldDirectionAt = now;
+        queueDirectionMove(direction);
         return false;
       }
 
@@ -499,7 +654,11 @@ export function userScriptStartUI() {
           if (wrapper) {
             wrapper.dataset.ytafIgnoreClickUntil = String(Date.now() + 1000);
           }
-          checkboxTools.toggleCheck(focusedElement.id);
+          if (focusedElement.dataset.ytafControl === 'choice') {
+            choiceTools.cycle(focusedElement.id);
+          } else {
+            checkboxTools.toggleCheck(focusedElement.id);
+          }
         }
         return false;
       }

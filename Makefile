@@ -13,7 +13,7 @@ PACKAGE_NAME_OFFICIAL?=youtube.leanback.v4
 PACKAGE_NAME?=youtube.leanback.v4
 PACKAGE_NAME_TARGET=$(PACKAGE_NAME)
 PACKAGE_DISPLAY_NAME?=YouTube webOS Cobalt AdFree
-PROJECT_VERSION?=1.2.1
+PROJECT_VERSION?=1.2.2
 PACKAGE_COBALT_VERSION?=23.lts.6
 PACKAGE_VERSION?=$(PROJECT_VERSION)
 PACKAGE_IPK_BUILD=$(PACKAGE_NAME_TARGET)_$(PACKAGE_VERSION)_arm.ipk
@@ -23,7 +23,8 @@ PACKAGE_SOURCE_FORMAT?=auto
 # webOS 5.5 rejects epoch-0 timestamps in IPK member archives. Use the build
 # time by default, while allowing release automation to pin a timestamp.
 IPK_MEMBER_MTIME?=$(shell date +%s)
-IPK_MTIME_NORMALIZER?=scripts/normalize-ipk-mtime.py
+PACKAGE_MTIME_NORMALIZER?=scripts/normalize-package-mtime.py
+IPK_CONTAINER_VERIFIER?=scripts/verify-ipk-container.py
 PACKAGE_SB_API_VERSION?=$(shell strings $(WORKDIR)/image/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt 2>/dev/null | grep sb_api | jq -r '.sb_api_version' | grep -v null || strings $(WORKDIR)/package/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt 2>/dev/null | grep sb_api | jq -r '.sb_api_version' | grep -v null)
 YTAF_DEBUG?=0
 YTAF_DEBUG_ENABLED=$(filter 1 true yes on,$(YTAF_DEBUG))
@@ -424,6 +425,7 @@ ares-package:
 		npm install --save-dev @webos-tools/cli; \
 		aresCmd=node_modules/.bin/ares-package; \
 	fi; \
+	python3 $(PACKAGE_MTIME_NORMALIZER) --mtime $(IPK_MEMBER_MTIME) $(WORKDIR)/ipk; \
 	$$aresCmd -v -c $(WORKDIR)/ipk; \
 	$$aresCmd -v --outdir $(WORKDIR)/ipk-output $(WORKDIR)/ipk
 
@@ -434,7 +436,7 @@ ares-package-docker: docker-make.ares-package
 .PRECIOUS: $(PACKAGE_TARGET)
 $(PACKAGE_TARGET): FORCE $(WORKDIR)/image/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt $(WORKDIR)/cobalt $(WORKDIR)/ipk/content/app/cobalt/content/web/adblock ares-package-docker
 	mkdir -p $(dir $@)
-	python3 $(IPK_MTIME_NORMALIZER) --mtime $(IPK_MEMBER_MTIME) $(WORKDIR)/ipk-output/$(PACKAGE_IPK_BUILD)
+	python3 $(IPK_CONTAINER_VERIFIER) $(WORKDIR)/ipk-output/$(PACKAGE_IPK_BUILD)
 	mv $(WORKDIR)/ipk-output/$(PACKAGE_IPK_BUILD) $@
 	@echo "Package can be installed with:"
 	@echo "  ares-install $(PACKAGE_TARGET)"
@@ -449,7 +451,7 @@ $(PACKAGE_TARGET): FORCE $(WORKDIR)/image/usr/palm/applications/$(PACKAGE_NAME_O
 
 .PHONY: docker-make.%
 docker-make.%:
-	docker run --rm -i -u $$(id -u):$$(id -g) -e HOME=/app -e npm_config_cache=/app/.npm -e WEBAPP_DEBUG="$(WEBAPP_DEBUG)" -v "$$PWD:/app" -w /app $(NODE_DOCKER_IMAGE) sh -lc 'mkdir -p /app/.webos /app/.npm && make $*'
+	docker run --rm -i -u $$(id -u):$$(id -g) -e HOME=/app -e npm_config_cache=/app/.npm -e WEBAPP_DEBUG="$(WEBAPP_DEBUG)" -e IPK_MEMBER_MTIME="$(IPK_MEMBER_MTIME)" -v "$(CURRENT_DIR):/app" -w /app $(NODE_DOCKER_IMAGE) sh -lc 'mkdir -p /app/.webos /app/.npm && make $*'
 .PHONY: npm
 npm:
 	( \

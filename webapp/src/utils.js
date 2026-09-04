@@ -1,6 +1,28 @@
 // const YT_BASE_URL = new URL('https://www.youtube.com/tv#/');
+import { configRead } from './config.js';
+
 const YT_BASE_URL = new URL('https://www.youtube.com/tv#/');
 const CONTENT_INTENT_REGEX = /^.+(?=Content)/g;
+const STARTUP_PAGE_ENDPOINTS = {
+  subscriptions: { browseId: 'FEsubscriptions' },
+  shorts: {
+    url: '/youtubei/v1/reel/reel_item_watch',
+    iconType: 'YOUTUBE_SHORTS_FILL_24',
+    title: 'Shorts'
+  },
+  library: { browseId: 'FElibrary' }
+};
+const STARTUP_PAGE_RETRY_INTERVAL_MS = 250;
+const STARTUP_PAGE_MAX_ATTEMPTS = 80;
+let startupPageApplied = false;
+
+export function getStartupPageUrl(page = configRead('startupPage')) {
+  const browseId = STARTUP_PAGE_ENDPOINTS[page] &&
+    STARTUP_PAGE_ENDPOINTS[page].browseId;
+  return browseId
+    ? `${YT_BASE_URL.origin}/tv#/browse/${browseId}`
+    : YT_BASE_URL.toString();
+}
 
 export function extractLaunchParams() {
   if (window.launchParams) {
@@ -67,6 +89,61 @@ export function handleLaunch(params) {
   }
 
   window.location.href = href;
+}
+
+export function handleInitialLaunch() {
+  const params = extractLaunchParams();
+  if (params.target !== undefined || params.contentTarget !== undefined) {
+    return;
+  }
+
+  const page = configRead('startupPage');
+  const startupEndpoint = STARTUP_PAGE_ENDPOINTS[page];
+  if (!startupEndpoint || startupPageApplied) return;
+
+  let attempts = 0;
+  const applyStartupPage = () => {
+    attempts += 1;
+
+    const renderers = document.querySelectorAll('ytlr-guide-entry-renderer');
+    for (let index = 0; index < renderers.length; index += 1) {
+      const renderer = renderers[index];
+      const instance = renderer.__instance;
+      const props = instance && instance.props;
+      const endpoint = props && props.data && props.data.navigationEndpoint;
+      const rendererBrowseId = endpoint && endpoint.browseEndpoint
+        && endpoint.browseEndpoint.browseId;
+      const rendererUrl = endpoint && endpoint.commandMetadata
+        && endpoint.commandMetadata.webCommandMetadata
+        && endpoint.commandMetadata.webCommandMetadata.url;
+      const rendererIconType = props && props.data && props.data.icon
+        && props.data.icon.iconType;
+      const rendererTitle = props && props.data && props.data.formattedTitle
+        && props.data.formattedTitle.simpleText;
+      const endpointMatches = startupEndpoint.browseId
+        ? rendererBrowseId === startupEndpoint.browseId
+        : rendererUrl === startupEndpoint.url
+          || rendererIconType === startupEndpoint.iconType
+          || rendererTitle === startupEndpoint.title;
+
+      if (!endpointMatches || typeof props.onSelect !== 'function') {
+        continue;
+      }
+
+      startupPageApplied = true;
+      console.info(`Applying configured startup page: ${page}`);
+      props.onSelect();
+      return;
+    }
+
+    if (attempts < STARTUP_PAGE_MAX_ATTEMPTS) {
+      window.setTimeout(applyStartupPage, STARTUP_PAGE_RETRY_INTERVAL_MS);
+    } else {
+      console.warn(`Configured startup page was not found: ${page}`);
+    }
+  };
+
+  applyStartupPage();
 }
 
 /**
