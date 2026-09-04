@@ -13,7 +13,7 @@ PACKAGE_NAME_OFFICIAL?=youtube.leanback.v4
 PACKAGE_NAME?=youtube.leanback.v4
 PACKAGE_NAME_TARGET=$(PACKAGE_NAME)
 PACKAGE_DISPLAY_NAME?=YouTube webOS Cobalt AdFree
-PROJECT_VERSION?=1.2.2
+PROJECT_VERSION?=1.2.3
 PACKAGE_COBALT_VERSION?=23.lts.6
 PACKAGE_VERSION?=$(PROJECT_VERSION)
 PACKAGE_IPK_BUILD=$(PACKAGE_NAME_TARGET)_$(PACKAGE_VERSION)_arm.ipk
@@ -426,7 +426,7 @@ ares-package:
 		aresCmd=node_modules/.bin/ares-package; \
 	fi; \
 	python3 $(PACKAGE_MTIME_NORMALIZER) --mtime $(IPK_MEMBER_MTIME) $(WORKDIR)/ipk; \
-	$$aresCmd -v -c $(WORKDIR)/ipk; \
+	$$$aresCmd -v -c $(WORKDIR)/ipk; \
 	$$aresCmd -v --outdir $(WORKDIR)/ipk-output $(WORKDIR)/ipk
 
 .PHONY: ares-package-docker

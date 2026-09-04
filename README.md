@@ -10,7 +10,7 @@ This project patches the webOS YouTube application by replacing or modifying the
 
 > This project is unofficial and is not affiliated with YouTube, Google, LG or webOS.
 
-## v1.2.2
+## v1.2.3
 
 The latest release is available from the GitHub releases page:
 
@@ -106,7 +106,7 @@ limitations are included in the result column.
 | LG C1 OLED | 6.5.0 | 03.51.16 | v1.2.0 standard package | Clean installation, sign-in, playback, ad blocking and SponsorBlock work. ([#33](https://github.com/RF1705/youtube-webos-cobalt-adfree/issues/33#issuecomment-5114026899)) |
 | LG CineBeam HU710PB-GL | 6.3.1 | 03.00.27 | v1.2.1 PJTR package | Installation, home screen, sign-in, playback, ad blocking, SponsorBlock and launch after restart work. webOS required selecting **Update** in the Content Store prompt before the first successful launch. ([#1](https://github.com/RF1705/youtube-webos-cobalt-adfree/issues/1#issuecomment-5155709661)) |
 
-The standard v1.2.2 package uses the same Cobalt 23.lts.6 / Starboard 13
+The standard v1.2.3 package uses the same Cobalt 23.lts.6 / Starboard 13
 compatibility baseline as v1.2.0, but has not yet received a separate standard
 package device confirmation in the issue tracker. A C1 report for v1.2.0
 confirms that 4K was still unavailable on that device
@@ -157,7 +157,7 @@ using one of the following methods.
 Use this package for the standard `youtube.leanback.v4` application:
 
 ```text
-youtube.leanback.v4_1.2.2_arm.ipk
+youtube.leanback.v4_1.2.3_arm.ipk
 ```
 
 The release also contains `youtube.leanback.v4.manifest.json` for installation
@@ -169,13 +169,13 @@ Use this package only for the LG CineBeam HU710PB-GL or another confirmed
 PJTR/k7lp device using the stock app id `youtube.leanback.v4-pjtr`:
 
 ```text
-youtube.leanback.v4-pjtr_1.2.2_arm.ipk
+youtube.leanback.v4-pjtr_1.2.3_arm.ipk
 ```
 
 SHA-256:
 
 ```text
-2a3f1383c6d8f9a398fcad9a6cfd233917205d458332d91b28e68745150e9606
+b2bb04232130b8e95a75bcf989140992d709ae9b0ae6ab952df7b16d76e6c744
 ```
 
 Because this package uses the same app id as the stock PJTR YouTube
@@ -217,13 +217,13 @@ Use the webOS Device Manager and install the downloaded `.ipk` package.
 Standard package:
 
 ```sh
-ares-install youtube.leanback.v4_1.2.2_arm.ipk
+ares-install youtube.leanback.v4_1.2.3_arm.ipk
 ```
 
 PJTR/k7lp package:
 
 ```sh
-ares-install youtube.leanback.v4-pjtr_1.2.2_arm.ipk
+ares-install youtube.leanback.v4-pjtr_1.2.3_arm.ipk
 ```
 
 ### Install via SSH on rooted/Homebrew webOS
@@ -236,8 +236,8 @@ Standard package:
 ```sh
 mkdir -p /media/developer/temp
 cd /media/developer/temp
-wget https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.2.2/youtube.leanback.v4_1.2.2_arm.ipk
-luna-send-pub -i 'luna://com.webos.appInstallService/dev/install' '{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/youtube.leanback.v4_1.2.2_arm.ipk","subscribe":true}'
+wget https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.2.3/youtube.leanback.v4_1.2.3_arm.ipk
+luna-send-pub -i 'luna://com.webos.appInstallService/dev/install' '{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/youtube.leanback.v4_1.2.3_arm.ipk","subscribe":true}'
 ```
 
 PJTR/k7lp package:
@@ -245,14 +245,14 @@ PJTR/k7lp package:
 ```sh
 mkdir -p /media/developer/temp
 cd /media/developer/temp
-wget https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.2.2/youtube.leanback.v4-pjtr_1.2.2_arm.ipk
-luna-send-pub -i 'luna://com.webos.appInstallService/dev/install' '{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/youtube.leanback.v4-pjtr_1.2.2_arm.ipk","subscribe":true}'
+wget https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/download/v1.2.3/youtube.leanback.v4-pjtr_1.2.3_arm.ipk
+luna-send-pub -i 'luna://com.webos.appInstallService/dev/install' '{"id":"com.ares.defaultName","ipkUrl":"/media/developer/temp/youtube.leanback.v4-pjtr_1.2.3_arm.ipk","subscribe":true}'
 ```
 
 After installation, the downloaded package can be removed:
 
 ```sh
-rm /media/developer/temp/youtube.leanback.v4*_1.2.2_arm.ipk
+rm /media/developer/temp/youtube.leanback.v4*_1.2.3_arm.ipk
 ```
 
 ## Patch an official YouTube IPK
@@ -308,7 +308,7 @@ The target updates the private images, verifies the exact starter contents and
 uses `.private-images/cobalt-bin/23.lts.6-12.xz` to create:
 
 ```text
-output/youtube.leanback.v4-pjtr_1.2.2_arm.ipk
+output/youtube.leanback.v4-pjtr_1.2.3_arm.ipk
 ```
 
 Override `PROJECT_VERSION` when preparing another release. The starter archive
