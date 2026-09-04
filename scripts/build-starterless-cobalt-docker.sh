@@ -15,35 +15,40 @@ if ! docker volume inspect "$sdk_volume" >/dev/null 2>&1; then
   exit 3
 fi
 
-# The default SDL bundle is built from the pinned webOSbrew SDL source with the
-# lifecycle SIGCONT patch. An explicitly supplied SDL2_BUNDLE_DIR remains an
-# escape hatch for development or compatibility testing.
-if [[ -z "${SDL2_BUNDLE_DIR:-}" ]]; then
-  SDL2_BUNDLE_DIR="$sdl_root" \
-  WEBOS_LINUX_SDK_VOLUME="$sdk_volume" \
-    "$repo_root/scripts/build-sdl-webos-docker.sh"
-fi
-
+# The starterless Shorts port does not rebuild SDL. Reuse the already prepared
+# webOS SDL bundle containing the existing lifecycle/SIGCONT changes.
 if [[ ! -d "$sdl_root/include/SDL2" || ! -f "$sdl_root/lib/libSDL2.a" ]]; then
-  echo "SDL2_BUNDLE_DIR does not contain a usable webOS SDL static bundle: $sdl_root" >&2
+  echo "Missing prebuilt patched SDL-webOS bundle: $sdl_root" >&2
+  echo "Restore the existing starterless SDL bundle or set SDL2_BUNDLE_DIR." >&2
+  echo "SDL does not need to be rebuilt for the Shorts preload change." >&2
+  exit 2
+fi
+if [[ ! -f "$sdl_root/include/SDL2/SDL_config.h" ]]; then
+  echo "SDL bundle is missing SDL_config.h: $sdl_root" >&2
+  exit 2
+fi
+if ! grep -Eq '^#define SDL_WEBOS_BROKEN_ABI[[:space:]]+1$' "$sdl_root/include/SDL2/SDL_config.h"; then
+  echo "SDL bundle does not enable SDL_WEBOS_BROKEN_ABI: $sdl_root" >&2
+  exit 2
+fi
+if ! grep -Eq '^#define SDL_VIDEO_DRIVER_WAYLAND_WEBOS[[:space:]]+1$' "$sdl_root/include/SDL2/SDL_config.h"; then
+  echo "SDL bundle does not enable the webOS Wayland backend: $sdl_root" >&2
   exit 2
 fi
 
+echo "Using existing patched SDL-webOS bundle: $sdl_root"
 echo "Building YTAF web assets."
 make -C "$repo_root" docker-make.npm
 
-# Apply the normal YTAF Cobalt patch and the isolated early-preload extension
-# before installing the starterless platform patches. This keeps a fresh Cobalt
-# checkout reproducible and avoids applying the base patch over Starfish/UHD
-# source changes afterwards.
+# Add only the normal YTAF integration plus the isolated early-preload hook.
+# Existing starterless Starboard, UHD/HDR, Starfish and lifecycle patches stay
+# untouched and are installed through the existing platform installer.
 bash "$repo_root/scripts/install-ytaf-cobalt-assets.sh" "$cobalt_root"
 "$repo_root/scripts/install-webos-starboard-platform.sh" "$cobalt_root"
 mkdir -p "$(dirname "$build_log")"
 
-# An incremental GN build can otherwise retain the copied web assets from an
-# older starterless build. Remove only that generated directory so Ninja must
-# recreate it from the current webapp/output without throwing away compiled
-# Cobalt objects.
+# Force GN/Ninja to refresh only the generated adblock content while keeping the
+# existing compiled Cobalt objects for an incremental rebuild.
 rm -rf "$cobalt_root/$out_dir/content/web/adblock"
 
 echo "Starting the long Cobalt webos-arm build with $parallel jobs."
