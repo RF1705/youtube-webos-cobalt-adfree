@@ -54,6 +54,27 @@ function isTvShortsShelf(value) {
   );
 }
 
+function hasGuideRenderer(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 6) return false;
+
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasGuideRenderer(entry, depth + 1));
+  }
+
+  if (
+    value.guideRenderer ||
+    value.guideSectionRenderer ||
+    value.guideSubscriptionsSectionRenderer ||
+    value.guideEntryRenderer
+  ) {
+    return true;
+  }
+
+  return Object.keys(value).some((key) =>
+    hasGuideRenderer(value[key], depth + 1)
+  );
+}
+
 export function isShortsResponseEntry(value) {
   if (!value || typeof value !== 'object') return false;
 
@@ -113,4 +134,11 @@ export function isBrowseResponse(value) {
         value.onResponseReceivedActions ||
         value.onResponseReceivedEndpoints)
   );
+}
+
+export function isGuideResponse(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (value.videoDetails || value.streamingData) return false;
+
+  return hasGuideRenderer(value);
 }
