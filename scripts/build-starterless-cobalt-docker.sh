@@ -36,7 +36,7 @@ make -C "$repo_root" docker-make.npm
 # before installing the starterless platform patches. This keeps a fresh Cobalt
 # checkout reproducible and avoids applying the base patch over Starfish/UHD
 # source changes afterwards.
-"$repo_root/scripts/install-ytaf-cobalt-assets.sh" "$cobalt_root"
+bash "$repo_root/scripts/install-ytaf-cobalt-assets.sh" "$cobalt_root"
 "$repo_root/scripts/install-webos-starboard-platform.sh" "$cobalt_root"
 mkdir -p "$(dirname "$build_log")"
 
