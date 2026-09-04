@@ -1,0 +1,97 @@
+diff --git a/cobalt/adblock/content/BUILD.gn b/cobalt/adblock/content/BUILD.gn
+--- a/cobalt/adblock/content/BUILD.gn
++++ b/cobalt/adblock/content/BUILD.gn
+@@ -2,6 +2,7 @@ copy("copy_adblock_web_files") {
+   install_content = true
+ 
+   sources = [
++    "adblockPreload.js",
+     "adblockMain.js",
+     "adblockMain.css",
+   ]
+diff --git a/cobalt/browser/web_module.cc b/cobalt/browser/web_module.cc
+--- a/cobalt/browser/web_module.cc
++++ b/cobalt/browser/web_module.cc
+@@ -55,9 +55,11 @@
+ #include "cobalt/web/url.h"
+ #include "starboard/accessibility.h"
++#include "starboard/common/file.h"
+ #include "starboard/common/log.h"
+ #include "starboard/gles.h"
++#include "starboard/system.h"
+ 
+ #if defined(ENABLE_DEBUGGER)
+ #include "cobalt/debug/backend/debug_module.h"  // nogncheck
+@@ -75,6 +77,42 @@ namespace {
+ // deeper than this could be discarded, and will not be rendered.
+ const int kDOMMaxElementDepth = 32;
+ 
++bool ReadYtafPreloadScript(std::string* script, std::string* source_path) {
++  char content_dir[4096] = {0};
++  if (!SbSystemGetPath(kSbSystemPathContentDirectory, content_dir,
++                       static_cast<int>(sizeof(content_dir)))) {
++    LOG(ERROR) << "[YTAF] Cannot resolve content directory for preload";
++    return false;
++  }
++
++  const char* suffixes[] = {
++      "/web/adblock/adblockPreload.js",
++      "/adblock/adblockPreload.js",
++  };
++
++  for (const char* suffix : suffixes) {
++    const std::string path = std::string(content_dir) + suffix;
++    starboard::ScopedFile file(path.c_str(), kSbFileOpenOnly | kSbFileRead);
++    if (!file.IsValid()) {
++      continue;
++    }
++
++    const int64_t size = file.GetSize();
++    if (size <= 0 || size > 4 * 1024 * 1024) {
++      LOG(ERROR) << "[YTAF] Invalid preload script size: " << size;
++      return false;
++    }
++
++    script->resize(static_cast<size_t>(size));
++    const int bytes_read =
++        file.ReadAll(&(*script)[0], static_cast<int>(size));
++    if (bytes_read != size) {
++      script->clear();
++      continue;
++    }
++
++    *source_path = path;
++    return true;
++  }
++
++  LOG(ERROR) << "[YTAF] adblockPreload.js not found in content directory";
++  return false;
++}
++
+ void CacheUrlContent(SplashScreenCache* splash_screen_cache,
+                      const std::string& content,
+                      const base::Optional<std::string>& topic) {
+@@ -553,6 +591,23 @@ WebModule::Impl::Impl(web::Context* web_context, const ConstructionData& data)
+   web_context_->global_environment()->CreateGlobalObject(
+       window_, web_context_->environment_settings());
++
++  std::string ytaf_preload_script;
++  std::string ytaf_preload_path;
++  if (ReadYtafPreloadScript(&ytaf_preload_script, &ytaf_preload_path)) {
++    bool ytaf_preload_succeeded = false;
++    LOG(INFO) << "[YTAF] Executing early preload from " << ytaf_preload_path;
++    web_context_->script_runner()->Execute(
++        ytaf_preload_script,
++        base::SourceLocation(ytaf_preload_path, 1, 1),
++        false,
++        &ytaf_preload_succeeded);
++    if (ytaf_preload_succeeded) {
++      LOG(INFO) << "[YTAF] Early preload completed";
++    } else {
++      LOG(ERROR) << "[YTAF] Early preload execution failed";
++    }
++  }
++
+   DCHECK(web_context_->GetWindowOrWorkerGlobalScope()->IsWindow());
+   DCHECK(!web_context_->GetWindowOrWorkerGlobalScope()->IsDedicatedWorker());
+   DCHECK(!web_context_->GetWindowOrWorkerGlobalScope()->IsServiceWorker());
