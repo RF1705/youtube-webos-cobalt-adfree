@@ -37,6 +37,13 @@ if ! grep -Eq '^#define SDL_VIDEO_DRIVER_WAYLAND_WEBOS[[:space:]]+1$' "$sdl_root
 fi
 
 echo "Using existing patched SDL-webOS bundle: $sdl_root"
+echo "Building webOS VP9/AV1 codec bundles."
+COBALT_SOURCE_DIR="$cobalt_root" \
+WEBOS_LINUX_SDK_VOLUME="$sdk_volume" \
+VPX_PARALLEL="$parallel" \
+DAV1D_PARALLEL="$parallel" \
+  "$repo_root/scripts/build-webos-video-codecs-docker.sh"
+
 echo "Building YTAF web assets."
 make -C "$repo_root" docker-make.npm
 
