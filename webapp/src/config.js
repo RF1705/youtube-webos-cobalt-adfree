@@ -68,17 +68,25 @@ export function configWrite(key, value) {
   window.__ytafConfigState = localConfig;
   window.localStorage[CONFIG_KEY] = JSON.stringify(localConfig);
 
-  if (
-    key === 'enableShorts' &&
-    typeof window.__ytafApplyShortsState === 'function'
-  ) {
-    try {
-      window.__ytafApplyShortsState();
-    } catch (err) {
-      console.warn('Failed to apply Shorts state:', err);
+  let applyResult = null;
+
+  if (key === 'enableShorts') {
+    console.error('[ytaf shorts] config persisted enableShorts=' + value);
+
+    if (typeof window.__ytafApplyShortsState === 'function') {
+      try {
+        applyResult = window.__ytafApplyShortsState();
+        console.error('[ytaf shorts] live apply returned ' + applyResult);
+      } catch (err) {
+        console.error('[ytaf shorts] live apply threw', err);
+      }
+    } else {
+      console.error('[ytaf shorts] live apply function is missing');
     }
   }
 
   dispatchConfigChanged(document, key, value);
   dispatchConfigChanged(window, key, value);
+
+  return applyResult;
 }
