@@ -82,10 +82,19 @@ jobs:
           test -s "$archive.sha256"
           test -s "$metadata"
 
-          (
-            cd "$artifact_dir"
-            sha256sum --check "$(basename "$archive").sha256"
-          )
+          # Older Cobalt artifacts contain the absolute path from the build
+          # runner in the checksum file. Compare only the digest so the
+          # artifact remains portable between workflow runs.
+          expected_sha="$(awk 'NR == 1 { print $1 }' "$archive.sha256")"
+          actual_sha="$(sha256sum "$archive" | awk '{ print $1 }')"
+          test -n "$expected_sha"
+          if [[ "$actual_sha" != "$expected_sha" ]]; then
+            echo "Cobalt runtime checksum mismatch." >&2
+            echo "Expected: $expected_sha" >&2
+            echo "Actual:   $actual_sha" >&2
+            exit 4
+          fi
+          echo "$actual_sha  $(basename "$archive")"
 
           source_sha="$(sed -n 's/^source_sha=//p' "$metadata")"
           source_ref="$(sed -n 's/^source_ref=//p' "$metadata")"
