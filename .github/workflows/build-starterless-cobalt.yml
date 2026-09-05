@@ -1,0 +1,336 @@
+name: Build starterless Cobalt
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Repository branch, tag or commit to build
+        required: true
+        default: starterless-cobalt-playback
+        type: string
+      cobalt_ref:
+        description: Upstream youtube/cobalt branch or tag
+        required: true
+        default: 23.lts.6
+        type: string
+      build_type:
+        description: Cobalt build type
+        required: true
+        default: devel
+        type: choice
+        options:
+          - devel
+          - gold
+      build_parallel:
+        description: Parallel compiler jobs
+        required: true
+        default: "4"
+        type: choice
+        options:
+          - "2"
+          - "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: starterless-cobalt-${{ inputs.source_ref }}-${{ inputs.cobalt_ref }}-${{ inputs.build_type }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Cobalt ${{ inputs.cobalt_ref }} from ${{ inputs.source_ref }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      COBALT_SOURCE_DIR: ${{ github.workspace }}/workdir/cobalt-source
+      SDL2_BUNDLE_DIR: ${{ github.workspace }}/workdir/deps/SDL2-2.30.12-webos-abi
+      WEBOS_LINUX_SDK_VOLUME: ytaf-webos-linux-sdk
+      COBALT_BUILD_TYPE: ${{ inputs.build_type }}
+      NINJA_PARALLEL: ${{ inputs.build_parallel }}
+      COBALT_BUILD_LOG: ${{ github.workspace }}/output/starterless-cobalt-${{ inputs.build_type }}.log
+
+    steps:
+      - name: Check out selected repository ref
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 1
+
+      - name: Validate selected source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/build-starterless-cobalt-docker.sh
+          test -f scripts/build-sdl-webos-docker.sh
+          test -f scripts/install-webos-starboard-platform.sh
+          test -d cobalt-platform/webos/arm
+
+          echo "Repository ref: ${{ inputs.source_ref }}"
+          echo "Repository SHA: $(git rev-parse HEAD)"
+          echo "Cobalt ref:     ${{ inputs.cobalt_ref }}"
+          echo "Build type:     ${{ inputs.build_type }}"
+
+      - name: Resolve artifact metadata
+        id: meta
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          COBALT_REF: ${{ inputs.cobalt_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          source_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          source_slug="$(printf '%s' "$SOURCE_REF" | tr '/ ' '--' | tr -cd 'A-Za-z0-9._-')"
+          cobalt_slug="$(printf '%s' "$COBALT_REF" | tr '/ ' '--' | tr -cd 'A-Za-z0-9._-')"
+
+          test -n "$source_slug"
+          test -n "$cobalt_slug"
+
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "source_slug=$source_slug" >> "$GITHUB_OUTPUT"
+          echo "cobalt_slug=$cobalt_slug" >> "$GITHUB_OUTPUT"
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h
+
+      - name: Install host build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils \
+            ca-certificates \
+            cmake \
+            curl \
+            findutils \
+            git \
+            gzip \
+            jq \
+            make \
+            ninja-build \
+            patch \
+            python3 \
+            rsync \
+            sed \
+            xz-utils
+
+      - name: Download pinned webOS ARM SDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_TAG: webos-a38c582
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk_download="$RUNNER_TEMP/webos-sdk-download"
+          mkdir -p "$sdk_download"
+
+          gh release download "$SDK_TAG" \
+            --repo openlgtv/buildroot-nc4 \
+            --pattern 'arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz' \
+            --dir "$sdk_download" \
+            --clobber
+
+          test -s "$sdk_download/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz"
+          echo "SDK_DOWNLOAD_DIR=$sdk_download" >> "$GITHUB_ENV"
+
+      - name: Prepare webOS SDK Docker volume
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker volume rm -f "$WEBOS_LINUX_SDK_VOLUME" >/dev/null 2>&1 || true
+          docker volume create "$WEBOS_LINUX_SDK_VOLUME" >/dev/null
+
+          docker run --rm \
+            -v "$WEBOS_LINUX_SDK_VOLUME:/sdk" \
+            -v "$SDK_DOWNLOAD_DIR:/input:ro" \
+            ubuntu:24.04 \
+            bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+                ca-certificates file findutils gzip sed tar
+              tar -xzf /input/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz -C /sdk
+              /sdk/arm-webos-linux-gnueabi_sdk-buildroot/relocate-sdk.sh
+              test -f /sdk/arm-webos-linux-gnueabi_sdk-buildroot/share/buildroot/toolchainfile.cmake
+            '
+
+      - name: Check out upstream Cobalt
+        env:
+          COBALT_REF: ${{ inputs.cobalt_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$COBALT_SOURCE_DIR"
+          mkdir -p "$COBALT_SOURCE_DIR"
+
+          git -C "$COBALT_SOURCE_DIR" init
+          git -C "$COBALT_SOURCE_DIR" remote add origin https://github.com/youtube/cobalt.git
+          git -C "$COBALT_SOURCE_DIR" fetch --depth 1 origin "$COBALT_REF"
+          git -C "$COBALT_SOURCE_DIR" checkout --detach FETCH_HEAD
+
+          echo "Checked out Cobalt $(git -C "$COBALT_SOURCE_DIR" describe --tags --always)"
+
+      - name: Prepare legacy Cobalt Docker definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          root = Path(os.environ['COBALT_SOURCE_DIR'])
+
+          compose = root / 'docker-compose.yml'
+          text = compose.read_text()
+          text = text.replace(
+              '  <<: *common-definitions\n  <<: *build-volumes\n',
+              '  <<: [*common-definitions, *build-volumes]\n',
+          )
+          compose.write_text(text)
+
+          base = root / 'docker/linux/base/Dockerfile'
+          text = base.read_text()
+          text = text.replace(
+              'FROM ${BASE_OS:-gcr.io/cloud-marketplace-containers/google/debian10}:${BASE_OS_TAG:-latest}',
+              'FROM ${BASE_OS:-debian}:${BASE_OS_TAG:-10-slim}',
+          )
+          marker = 'ENV PYTHONUNBUFFERED 1\n'
+          archive_fix = '''ENV PYTHONUNBUFFERED 1
+
+RUN sed -i \\
+      -e "s|http://security.debian.org/debian-security|http://archive.debian.org/debian-security|" \\
+      -e "s|http://deb.debian.org/debian|http://archive.debian.org/debian|" \\
+      -e "s|http://httpredir.debian.org/debian|http://archive.debian.org/debian|" \\
+      -e "s|deb http://archive.debian.org/debian buster-updates|# deb http://archive.debian.org/debian buster-updates|" \\
+      /etc/apt/sources.list \\
+    && printf '%s\\n' 'Acquire::Check-Valid-Until false;' > /etc/apt/apt.conf.d/99archive
+'''
+          if 'Acquire::Check-Valid-Until false' not in text:
+              text = text.replace(marker, archive_fix, 1)
+          base.write_text(text)
+
+          build = root / 'docker/linux/base/build/Dockerfile'
+          text = build.read_text()
+          text = text.replace('        binutils \\\n', '        binutils \\\n        cmake \\\n', 1)
+          text = text.replace('&& . /tmp/install.sh', '&& bash /tmp/install.sh')
+          text = text.replace('nvm install --lts ${LTS_VERSION}', 'nvm install 16')
+          text = text.replace('nvm alias default ${LTS_VERSION}/*', 'nvm alias default 16/*')
+          build.write_text(text)
+          PY
+
+      - name: Build Cobalt Docker images
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd "$COBALT_SOURCE_DIR"
+            export DOCKER_DEFAULT_PLATFORM=linux/amd64
+            docker compose build base
+            docker compose build build-base
+            docker compose build build-evergreen
+          )
+
+          docker image inspect cobalt-build-evergreen:latest >/dev/null
+
+      - name: Build patched SDL-webOS bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-sdl-webos-docker.sh
+
+      - name: Build starterless Cobalt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          bash scripts/build-starterless-cobalt-docker.sh
+
+      - name: Create Cobalt runtime archive
+        id: archive
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          COBALT_REF: ${{ inputs.cobalt_ref }}
+          SOURCE_SHA: ${{ steps.meta.outputs.source_sha }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          COBALT_SLUG: ${{ steps.meta.outputs.cobalt_slug }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build_dir="$COBALT_SOURCE_DIR/out/webos-arm-sbversion-13_${BUILD_TYPE}"
+          test -x "$build_dir/cobalt"
+          test -d "$build_dir/content"
+
+          archive="starterless-cobalt-${COBALT_SLUG}-sb13-${BUILD_TYPE}-${SHORT_SHA}.tar.xz"
+          archive_path="$GITHUB_WORKSPACE/output/$archive"
+
+          tar -C "$build_dir" -cJf "$archive_path" cobalt content
+          sha256sum "$archive_path" > "$archive_path.sha256"
+
+          cat > "$GITHUB_WORKSPACE/output/cobalt-build.json" <<EOF
+          {
+            "repository": "$GITHUB_REPOSITORY",
+            "source_ref": "$SOURCE_REF",
+            "source_sha": "$SOURCE_SHA",
+            "cobalt_ref": "$COBALT_REF",
+            "starboard_api": 13,
+            "build_type": "$BUILD_TYPE",
+            "archive": "$archive"
+          }
+          EOF
+
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+          {
+            echo '## Starterless Cobalt build'
+            echo
+            echo "- Repository ref: \`$SOURCE_REF\`"
+            echo "- Repository SHA: \`$SOURCE_SHA\`"
+            echo "- Cobalt ref: \`$COBALT_REF\`"
+            echo '- Starboard API: `13`'
+            echo "- Build type: \`$BUILD_TYPE\`"
+            echo "- Runtime archive: \`$archive\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Cobalt runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: starterless-cobalt-${{ steps.meta.outputs.cobalt_slug }}-${{ steps.meta.outputs.short_sha }}
+          path: |
+            output/${{ steps.archive.outputs.archive }}
+            output/${{ steps.archive.outputs.archive }}.sha256
+            output/cobalt-build.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Cobalt build log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: starterless-cobalt-build-log-${{ steps.meta.outputs.short_sha }}
+          path: output/starterless-cobalt-${{ inputs.build_type }}.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Show final disk usage
+        if: ${{ always() }}
+        shell: bash
+        run: df -h
