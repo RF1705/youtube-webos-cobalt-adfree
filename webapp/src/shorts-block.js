@@ -8,8 +8,9 @@ export function userScriptStartShortsBlockUI() {
 
   const wrapper = control.parentElement;
   const description = wrapper && wrapper.querySelector('.desc');
+  const label = languageText('ui', 'shorts');
   if (description) {
-    description.textContent = languageText('ui', 'shorts');
+    description.textContent = label;
   }
 
   const blocked = !Boolean(configRead('enableShorts'));
@@ -21,13 +22,21 @@ export function userScriptStartShortsBlockUI() {
 
   checkboxTools.setCallback('__shorts', (newState) => {
     const enableShorts = !newState;
-    console.error(
-      '[ytaf shorts] toggle callback newState=' +
-        newState +
-        ' enableShorts=' +
-        enableShorts
-    );
-    const applyResult = configWrite('enableShorts', enableShorts);
-    console.error('[ytaf shorts] toggle callback done applyResult=' + applyResult);
+
+    if (description) {
+      description.textContent = `${label} [callback]`;
+    }
+
+    try {
+      const applyResult = configWrite('enableShorts', enableShorts);
+      if (description) {
+        description.textContent = `${label} [saved apply=${String(applyResult)}]`;
+      }
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      if (description) {
+        description.textContent = `${label} [ERROR: ${message}]`;
+      }
+    }
   });
 }
