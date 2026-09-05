@@ -20,6 +20,14 @@ export function userScriptStartShortsBlockUI() {
   }
 
   checkboxTools.setCallback('__shorts', (newState) => {
-    configWrite('enableShorts', !newState);
+    const enableShorts = !newState;
+    console.error(
+      '[ytaf shorts] toggle callback newState=' +
+        newState +
+        ' enableShorts=' +
+        enableShorts
+    );
+    const applyResult = configWrite('enableShorts', enableShorts);
+    console.error('[ytaf shorts] toggle callback done applyResult=' + applyResult);
   });
 }
