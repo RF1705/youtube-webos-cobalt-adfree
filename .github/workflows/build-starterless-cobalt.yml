@@ -216,6 +216,20 @@ jobs:
           docker compose build build-evergreen
           docker image inspect cobalt-build-evergreen:latest >/dev/null
 
+      - name: Add SDL build tools to Cobalt image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t cobalt-build-evergreen:latest - <<'EOF'
+          FROM cobalt-build-evergreen:latest
+          RUN apt update -qqy \
+              && apt install -qqy --no-install-recommends cmake \
+              && /opt/clean-after-apt.sh
+          EOF
+
+          docker run --rm cobalt-build-evergreen:latest sh -lc \
+            'cmake --version && ninja --version'
+
       - name: Build patched SDL-webOS bundle
         shell: bash
         run: |
