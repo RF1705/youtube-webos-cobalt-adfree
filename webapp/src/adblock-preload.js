@@ -21,17 +21,41 @@ if (!window.__ytafPreloadExecuted) {
     function captureGuideResponse(value) {
       try {
         originalGuideResponseJson = nativeStringify.call(JSON, value);
+        console.error('[ytaf shorts] captured guide response');
       } catch (error) {
         console.warn('[ytaf preload] Failed to preserve guide response', error);
       }
     }
 
     function applyGuideShortsState() {
-      if (!originalGuideResponseJson) return false;
+      const enableShorts = Boolean(configRead('enableShorts'));
+      console.error(
+        '[ytaf shorts] apply begin enableShorts=' +
+          enableShorts +
+          ' guideCached=' +
+          Boolean(originalGuideResponseJson)
+      );
+
+      if (!originalGuideResponseJson) {
+        console.error('[ytaf shorts] apply abort: no cached guide response');
+        return false;
+      }
 
       const appElement = document.querySelector('ytlr-app');
-      const app = appElement && appElement.__instance;
-      if (!app || typeof app.K !== 'function') return false;
+      if (!appElement) {
+        console.error('[ytaf shorts] apply abort: ytlr-app not found');
+        return false;
+      }
+
+      const app = appElement.__instance;
+      if (!app) {
+        console.error('[ytaf shorts] apply abort: ytlr-app.__instance missing');
+        return false;
+      }
+      if (typeof app.K !== 'function') {
+        console.error('[ytaf shorts] apply abort: app.K is not a function');
+        return false;
+      }
 
       let guideResponse;
       try {
@@ -41,11 +65,12 @@ if (!window.__ytafPreloadExecuted) {
         return false;
       }
 
-      if (!Boolean(configRead('enableShorts'))) {
+      if (!enableShorts) {
         stripShortsFromBrowseResponse(guideResponse);
       }
 
       app.K({ guideResponse });
+      console.error('[ytaf shorts] apply success via app.K');
       return true;
     }
 
@@ -53,6 +78,9 @@ if (!window.__ytafPreloadExecuted) {
 
     window.addEventListener('ytaf-config-changed', (event) => {
       if (event && event.detail && event.detail.key === 'enableShorts') {
+        console.error(
+          '[ytaf shorts] config event enableShorts=' + event.detail.value
+        );
         applyGuideShortsState();
       }
     });
