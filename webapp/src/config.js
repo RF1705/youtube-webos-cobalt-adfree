@@ -18,15 +18,19 @@ const defaultConfig = {
   enableShorts: true
 };
 
-let localConfig;
+let localConfig = window.__ytafConfigState;
 
-try {
-  localConfig = JSON.parse(
-    window.localStorage[CONFIG_KEY] || JSON.stringify(defaultConfig)
-  );
-} catch (err) {
-  console.warn('Config read failed:', err);
-  localConfig = { ...defaultConfig };
+if (!localConfig || typeof localConfig !== 'object') {
+  try {
+    localConfig = JSON.parse(
+      window.localStorage[CONFIG_KEY] || JSON.stringify(defaultConfig)
+    );
+  } catch (err) {
+    console.warn('Config read failed:', err);
+    localConfig = { ...defaultConfig };
+  }
+
+  window.__ytafConfigState = localConfig;
 }
 
 export function configRead(key) {
@@ -61,7 +65,19 @@ function dispatchConfigChanged(target, key, value) {
 export function configWrite(key, value) {
   console.info('Setting key', key, 'to', value);
   localConfig[key] = value;
+  window.__ytafConfigState = localConfig;
   window.localStorage[CONFIG_KEY] = JSON.stringify(localConfig);
+
+  if (
+    key === 'enableShorts' &&
+    typeof window.__ytafApplyShortsState === 'function'
+  ) {
+    try {
+      window.__ytafApplyShortsState();
+    } catch (err) {
+      console.warn('Failed to apply Shorts state:', err);
+    }
+  }
 
   dispatchConfigChanged(document, key, value);
   dispatchConfigChanged(window, key, value);
