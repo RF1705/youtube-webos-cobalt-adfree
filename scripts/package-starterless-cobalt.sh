@@ -27,7 +27,9 @@ if [[ ! -f "$runtime_dir/libstdc++.so.6" || ! -f "$runtime_dir/libgcc_s.so.1" ]]
 fi
 
 # Never package a starterless binary from before the early-preload integration.
-if ! strings "$build_dir/cobalt" | grep -Fq '[YTAF] Executing early preload from'; then
+# Gold builds compile non-fatal LOG() strings out, so verify the runtime path
+# that ReadYtafPreloadScript() must retain in the binary instead.
+if ! grep -aFq '/web/adblock/adblockPreload.js' "$build_dir/cobalt"; then
   echo "Starterless Cobalt binary is stale and does not contain the YTAF early preload hook." >&2
   echo "Run scripts/build-starterless-cobalt-docker.sh first." >&2
   exit 5
@@ -56,9 +58,9 @@ cp "$repo_root/starterless-cobalt/appinfo.json" "$package_root/appinfo.json"
 cp "$build_dir/cobalt" "$package_root/cobalt"
 cp -R "$build_dir/content" "$package_root/content"
 
-# Always overlay the current webpack output at packaging time. The Cobalt build
-# also carries these files in its content target, but this prevents a stale
-# incremental GN copy from ever leaking into a newly packaged IPK.
+# Always overlay the selected web assets at packaging time. For artifact-based
+# packaging WEBAPP_OUTPUT_DIR may point at the runtime artifact itself, which
+# keeps the IPK byte-for-byte aligned with the tested Cobalt content bundle.
 adblock_target="$package_root/content/web/adblock"
 mkdir -p "$adblock_target"
 rm -rf "$adblock_target"/*
