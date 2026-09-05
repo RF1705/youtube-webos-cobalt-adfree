@@ -79,7 +79,10 @@ if [[ ! -x "$cobalt_binary" ]]; then
   echo "Starterless Cobalt binary was not produced: $cobalt_binary" >&2
   exit 5
 fi
-if ! strings "$cobalt_binary" | grep -Fq '[YTAF] Executing early preload from'; then
+# Gold builds compile out non-fatal logging, so verify the runtime path literal
+# used by ReadYtafPreloadScript instead of a LOG(INFO) message. Search the
+# binary directly to avoid strings|grep -q interacting badly with pipefail.
+if ! grep -aFq '/web/adblock/adblockPreload.js' "$cobalt_binary"; then
   echo "Starterless Cobalt binary does not contain the YTAF early preload hook." >&2
   echo "Refusing to use a stale binary." >&2
   exit 6
