@@ -245,6 +245,25 @@ jobs:
           set -euo pipefail
           bash scripts/build-sdl-webos-docker.sh
 
+      - name: Restore Cobalt sources after Docker bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The changes above exist only to bootstrap the legacy Cobalt Docker
+          # images on a current GitHub runner. The normal YTAF base patch also
+          # contains changes to these files and must see the pristine upstream
+          # sources when install-ytaf-cobalt-assets.sh applies it below.
+          git -C "$COBALT_SOURCE_DIR" restore --source=HEAD --worktree -- \
+            docker-compose.yml \
+            docker/linux/base/Dockerfile \
+            docker/linux/base/build/Dockerfile
+
+          git -C "$COBALT_SOURCE_DIR" diff --quiet -- \
+            docker-compose.yml \
+            docker/linux/base/Dockerfile \
+            docker/linux/base/build/Dockerfile
+
       - name: Build starterless Cobalt
         shell: bash
         run: |
