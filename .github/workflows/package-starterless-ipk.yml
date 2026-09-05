@@ -1,0 +1,256 @@
+name: Package starterless Cobalt IPK
+
+on:
+  workflow_dispatch:
+    inputs:
+      cobalt_run_id:
+        description: Successful Build starterless Cobalt workflow run ID
+        required: true
+        type: string
+      package_ref:
+        description: Repository ref containing the packaging scripts/app metadata
+        required: true
+        default: fix/starterless-shorts-preload
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    name: Package IPK from Cobalt run ${{ inputs.cobalt_run_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      COBALT_RUN_ID: ${{ inputs.cobalt_run_id }}
+      PACKAGE_REF: ${{ inputs.package_ref }}
+      SDK_TAG: webos-a38c582
+
+    steps:
+      - name: Validate Cobalt run ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$COBALT_RUN_ID" =~ ^[0-9]+$ ]] || {
+            echo "cobalt_run_id must be a numeric GitHub Actions run ID." >&2
+            exit 2
+          }
+
+      - name: Download Cobalt runtime artifact
+        id: cobalt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="$RUNNER_TEMP/cobalt-artifact"
+          mkdir -p "$artifact_dir"
+
+          artifacts_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$COBALT_RUN_ID/artifacts")"
+          mapfile -t artifact_names < <(
+            jq -r '
+              .artifacts[]
+              | select(.expired == false)
+              | select(.name | startswith("starterless-cobalt-"))
+              | select((.name | contains("build-log")) | not)
+              | .name
+            ' <<<"$artifacts_json"
+          )
+
+          if [[ "${#artifact_names[@]}" -ne 1 ]]; then
+            echo "Expected exactly one starterless Cobalt runtime artifact in run $COBALT_RUN_ID." >&2
+            echo "Available artifacts:" >&2
+            jq -r '.artifacts[] | "  - \(.name) (expired=\(.expired))"' <<<"$artifacts_json" >&2
+            exit 3
+          fi
+
+          artifact_name="${artifact_names[0]}"
+          echo "Downloading artifact: $artifact_name"
+          gh run download "$COBALT_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$artifact_name" \
+            --dir "$artifact_dir"
+
+          archive="$(find "$artifact_dir" -maxdepth 1 -type f -name '*.tar.xz' -print -quit)"
+          metadata="$artifact_dir/cobalt-build.txt"
+
+          test -n "$archive"
+          test -s "$archive"
+          test -s "$archive.sha256"
+          test -s "$metadata"
+
+          (
+            cd "$artifact_dir"
+            sha256sum --check "$(basename "$archive").sha256"
+          )
+
+          source_sha="$(sed -n 's/^source_sha=//p' "$metadata")"
+          source_ref="$(sed -n 's/^source_ref=//p' "$metadata")"
+          cobalt_ref="$(sed -n 's/^cobalt_ref=//p' "$metadata")"
+          build_type="$(sed -n 's/^build_type=//p' "$metadata")"
+
+          test -n "$source_sha"
+          test -n "$source_ref"
+          test -n "$cobalt_ref"
+          test -n "$build_type"
+
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "metadata=$metadata" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "source_ref=$source_ref" >> "$GITHUB_OUTPUT"
+          echo "cobalt_ref=$cobalt_ref" >> "$GITHUB_OUTPUT"
+          echo "build_type=$build_type" >> "$GITHUB_OUTPUT"
+
+      - name: Check out packaging source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.package_ref }}
+          fetch-depth: 1
+
+      - name: Validate packaging source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f scripts/package-starterless-cobalt.sh
+          test -f scripts/normalize-ipk-ownership.py
+          test -f scripts/verify-ipk-container.py
+          test -f starterless-cobalt/appinfo.json
+          test -f assets/icon.png
+          test -f assets/largeIcon.png
+
+          echo "Packaging ref: $PACKAGE_REF"
+          echo "Packaging SHA: $(git rev-parse HEAD)"
+          echo "Runtime source ref: ${{ steps.cobalt.outputs.source_ref }}"
+          echo "Runtime source SHA: ${{ steps.cobalt.outputs.source_sha }}"
+          echo "Cobalt ref: ${{ steps.cobalt.outputs.cobalt_ref }}"
+          echo "Build type: ${{ steps.cobalt.outputs.build_type }}"
+
+      - name: Extract Cobalt runtime
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          runtime_dir="$GITHUB_WORKSPACE/workdir/artifact-runtime"
+          rm -rf "$runtime_dir"
+          mkdir -p "$runtime_dir"
+          tar -xJf "${{ steps.cobalt.outputs.archive }}" -C "$runtime_dir"
+
+          test -x "$runtime_dir/cobalt"
+          test -d "$runtime_dir/content"
+          test -s "$runtime_dir/content/web/adblock/adblockMain.js"
+          test -s "$runtime_dir/content/web/adblock/adblockMain.css"
+          test -s "$runtime_dir/content/web/adblock/adblockPreload.js"
+          grep -aFq '/web/adblock/adblockPreload.js' "$runtime_dir/cobalt"
+          grep -Fq '__shorts' "$runtime_dir/content/web/adblock/adblockMain.js"
+          grep -Fq '__ytafPreloadExecuted' "$runtime_dir/content/web/adblock/adblockPreload.js"
+
+          echo "runtime_dir=$runtime_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Install webOS packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund
+          ./node_modules/.bin/ares-package --version
+
+      - name: Download ARM runtime libraries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdk_download="$RUNNER_TEMP/webos-sdk-download"
+          sdk_extract="$RUNNER_TEMP/webos-sdk"
+          runtime_libs="$GITHUB_WORKSPACE/starterless-cobalt/lib"
+
+          mkdir -p "$sdk_download" "$sdk_extract" "$runtime_libs"
+          rm -f "$runtime_libs/libstdc++.so.6" "$runtime_libs/libgcc_s.so.1"
+
+          gh release download "$SDK_TAG" \
+            --repo openlgtv/buildroot-nc4 \
+            --pattern 'arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz' \
+            --dir "$sdk_download" \
+            --clobber
+
+          tar -xzf "$sdk_download/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz" \
+            -C "$sdk_extract"
+
+          sysroot="$sdk_extract/arm-webos-linux-gnueabi_sdk-buildroot/arm-webos-linux-gnueabi/sysroot"
+          libstdcpp_link="$(find "$sysroot" -name 'libstdc++.so.6' -print -quit)"
+          libgcc_link="$(find "$sysroot" -name 'libgcc_s.so.1' -print -quit)"
+
+          test -n "$libstdcpp_link"
+          test -n "$libgcc_link"
+          test -e "$libstdcpp_link"
+          test -e "$libgcc_link"
+
+          cp -L "$libstdcpp_link" "$runtime_libs/libstdc++.so.6"
+          cp -L "$libgcc_link" "$runtime_libs/libgcc_s.so.1"
+
+          file "$runtime_libs/libstdc++.so.6" "$runtime_libs/libgcc_s.so.1"
+
+      - name: Package starterless IPK
+        id: package
+        env:
+          COBALT_BUILD_DIR: ${{ steps.runtime.outputs.runtime_dir }}
+          COBALT_RUNTIME_DIR: ${{ github.workspace }}/starterless-cobalt/lib
+          WEBAPP_OUTPUT_DIR: ${{ steps.runtime.outputs.runtime_dir }}/content/web/adblock
+          COBALT_PACKAGE_OUTPUT_DIR: ${{ github.workspace }}/output
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          bash scripts/package-starterless-cobalt.sh
+
+          package_path="$(find output -maxdepth 1 -type f -name '*.ipk' -print -quit)"
+          test -n "$package_path"
+          test -s "$package_path"
+
+          sha256sum "$package_path" > "$package_path.sha256"
+          echo "package_path=$package_path" >> "$GITHUB_OUTPUT"
+          echo "package_name=$(basename "$package_path")" >> "$GITHUB_OUTPUT"
+
+      - name: Write package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > output/starterless-ipk-build.txt <<EOF
+          repository=$GITHUB_REPOSITORY
+          cobalt_run_id=$COBALT_RUN_ID
+          cobalt_artifact=${{ steps.cobalt.outputs.artifact_name }}
+          cobalt_source_ref=${{ steps.cobalt.outputs.source_ref }}
+          cobalt_source_sha=${{ steps.cobalt.outputs.source_sha }}
+          cobalt_ref=${{ steps.cobalt.outputs.cobalt_ref }}
+          cobalt_build_type=${{ steps.cobalt.outputs.build_type }}
+          package_ref=$PACKAGE_REF
+          package_sha=$(git rev-parse HEAD)
+          package=${{ steps.package.outputs.package_name }}
+          EOF
+
+          {
+            echo '## Starterless Cobalt IPK'
+            echo
+            echo "- Cobalt workflow run: \`$COBALT_RUN_ID\`"
+            echo "- Runtime source: \`${{ steps.cobalt.outputs.source_ref }}\` @ \`${{ steps.cobalt.outputs.source_sha }}\`"
+            echo "- Cobalt: \`${{ steps.cobalt.outputs.cobalt_ref }}\` / \`${{ steps.cobalt.outputs.build_type }}\`"
+            echo "- Packaging ref: \`$PACKAGE_REF\` @ \`$(git rev-parse HEAD)\`"
+            echo "- IPK: \`${{ steps.package.outputs.package_name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload starterless IPK
+        uses: actions/upload-artifact@v4
+        with:
+          name: starterless-ipk-from-run-${{ inputs.cobalt_run_id }}
+          path: |
+            ${{ steps.package.outputs.package_path }}
+            ${{ steps.package.outputs.package_path }}.sha256
+            output/starterless-ipk-build.txt
+          if-no-files-found: error
+          retention-days: 14
