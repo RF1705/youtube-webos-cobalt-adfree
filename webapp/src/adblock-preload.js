@@ -8,8 +8,6 @@ import {
 if (!window.__ytafPreloadExecuted) {
   window.__ytafPreloadExecuted = true;
 
-  let shortsEnabled = Boolean(configRead('enableShorts'));
-
   if (!window.__ytafShortsResponseFilterInstalled) {
     window.__ytafShortsResponseFilterInstalled = true;
 
@@ -43,7 +41,7 @@ if (!window.__ytafPreloadExecuted) {
         return false;
       }
 
-      if (!shortsEnabled) {
+      if (!Boolean(configRead('enableShorts'))) {
         stripShortsFromBrowseResponse(guideResponse);
       }
 
@@ -51,9 +49,10 @@ if (!window.__ytafPreloadExecuted) {
       return true;
     }
 
+    window.__ytafApplyShortsState = applyGuideShortsState;
+
     window.addEventListener('ytaf-config-changed', (event) => {
       if (event && event.detail && event.detail.key === 'enableShorts') {
-        shortsEnabled = Boolean(event.detail.value);
         applyGuideShortsState();
       }
     });
@@ -74,7 +73,7 @@ if (!window.__ytafPreloadExecuted) {
         }
 
         if (
-          !shortsEnabled &&
+          !Boolean(configRead('enableShorts')) &&
           (isBrowseResponse(value) || guideResponse) &&
           stripShortsFromBrowseResponse(value)
         ) {
