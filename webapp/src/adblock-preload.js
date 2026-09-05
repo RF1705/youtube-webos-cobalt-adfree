@@ -51,7 +51,7 @@ if (!window.__ytafPreloadExecuted) {
       return true;
     }
 
-    document.addEventListener('ytaf-config-changed', (event) => {
+    window.addEventListener('ytaf-config-changed', (event) => {
       if (event && event.detail && event.detail.key === 'enableShorts') {
         shortsEnabled = Boolean(event.detail.value);
         applyGuideShortsState();
