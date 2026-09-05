@@ -27,6 +27,48 @@ if (!window.__ytafPreloadExecuted) {
       }
     }
 
+    function describeAppMethods(app) {
+      const methodNames = new Set();
+      let current = app;
+      let depth = 0;
+
+      while (current && depth < 4) {
+        Object.getOwnPropertyNames(current).forEach((name) => {
+          if (name === 'constructor') return;
+          try {
+            if (typeof app[name] === 'function') {
+              methodNames.add(name);
+            }
+          } catch (error) {
+            // Ignore getters that cannot be evaluated safely.
+          }
+        });
+        current = Object.getPrototypeOf(current);
+        depth += 1;
+      }
+
+      const names = Array.from(methodNames);
+      const guideCandidates = names.filter((name) => {
+        try {
+          return Function.prototype.toString.call(app[name]).includes('guideResponse');
+        } catch (error) {
+          return false;
+        }
+      });
+
+      if (guideCandidates.length) {
+        return 'guide=' + guideCandidates.slice(0, 8).join(',');
+      }
+
+      const compactNames = names
+        .filter((name) => name.length <= 2)
+        .slice(0, 20);
+
+      return compactNames.length
+        ? 'methods=' + compactNames.join(',')
+        : 'methods=none';
+    }
+
     function applyGuideShortsState() {
       const enableShorts = Boolean(configRead('enableShorts'));
       console.error(
@@ -53,8 +95,11 @@ if (!window.__ytafPreloadExecuted) {
         return 'no-instance';
       }
       if (typeof app.K !== 'function') {
-        console.error('[ytaf shorts] apply abort: app.K is not a function');
-        return 'no-app-K';
+        const methods = describeAppMethods(app);
+        console.error(
+          '[ytaf shorts] apply abort: app.K is not a function ' + methods
+        );
+        return 'no-app-K ' + methods;
       }
 
       let guideResponse;
