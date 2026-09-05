@@ -138,6 +138,17 @@ jobs:
           echo "Cobalt ref: ${{ steps.cobalt.outputs.cobalt_ref }}"
           echo "Build type: ${{ steps.cobalt.outputs.build_type }}"
 
+      - name: Build current webapp
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd webapp
+          npm ci --no-audit --no-fund
+          npm run build -- --env production
+          test -s output/adblockMain.js
+          test -s output/adblockMain.css
+          test -s output/adblockPreload.js
+
       - name: Extract Cobalt runtime
         id: runtime
         shell: bash
@@ -151,12 +162,7 @@ jobs:
 
           test -x "$runtime_dir/cobalt"
           test -d "$runtime_dir/content"
-          test -s "$runtime_dir/content/web/adblock/adblockMain.js"
-          test -s "$runtime_dir/content/web/adblock/adblockMain.css"
-          test -s "$runtime_dir/content/web/adblock/adblockPreload.js"
           grep -aFq '/web/adblock/adblockPreload.js' "$runtime_dir/cobalt"
-          grep -Fq '__shorts' "$runtime_dir/content/web/adblock/adblockMain.js"
-          grep -Fq '__ytafPreloadExecuted' "$runtime_dir/content/web/adblock/adblockPreload.js"
 
           echo "runtime_dir=$runtime_dir" >> "$GITHUB_OUTPUT"
 
@@ -209,7 +215,7 @@ jobs:
         env:
           COBALT_BUILD_DIR: ${{ steps.runtime.outputs.runtime_dir }}
           COBALT_RUNTIME_DIR: ${{ github.workspace }}/starterless-cobalt/lib
-          WEBAPP_OUTPUT_DIR: ${{ steps.runtime.outputs.runtime_dir }}/content/web/adblock
+          WEBAPP_OUTPUT_DIR: ${{ github.workspace }}/webapp/output
           COBALT_PACKAGE_OUTPUT_DIR: ${{ github.workspace }}/output
         shell: bash
         run: |
