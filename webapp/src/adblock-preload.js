@@ -38,23 +38,23 @@ if (!window.__ytafPreloadExecuted) {
 
       if (!originalGuideResponseJson) {
         console.error('[ytaf shorts] apply abort: no cached guide response');
-        return false;
+        return 'no-guide-cache';
       }
 
       const appElement = document.querySelector('ytlr-app');
       if (!appElement) {
         console.error('[ytaf shorts] apply abort: ytlr-app not found');
-        return false;
+        return 'no-ytlr-app';
       }
 
       const app = appElement.__instance;
       if (!app) {
         console.error('[ytaf shorts] apply abort: ytlr-app.__instance missing');
-        return false;
+        return 'no-instance';
       }
       if (typeof app.K !== 'function') {
         console.error('[ytaf shorts] apply abort: app.K is not a function');
-        return false;
+        return 'no-app-K';
       }
 
       let guideResponse;
@@ -62,16 +62,22 @@ if (!window.__ytafPreloadExecuted) {
         guideResponse = nativeParse.call(JSON, originalGuideResponseJson);
       } catch (error) {
         console.warn('[ytaf preload] Failed to restore guide response', error);
-        return false;
+        return 'parse-error';
       }
 
       if (!enableShorts) {
         stripShortsFromBrowseResponse(guideResponse);
       }
 
-      app.K({ guideResponse });
+      try {
+        app.K({ guideResponse });
+      } catch (error) {
+        console.error('[ytaf shorts] apply abort: app.K threw', error);
+        return 'app-K-threw';
+      }
+
       console.error('[ytaf shorts] apply success via app.K');
-      return true;
+      return 'success';
     }
 
     window.__ytafApplyShortsState = applyGuideShortsState;
