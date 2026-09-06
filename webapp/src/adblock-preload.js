@@ -18,60 +18,13 @@ if (!window.__ytafPreloadExecuted) {
     let parsing = false;
     let originalGuideResponseJson = null;
     let guideApplyHandler = null;
-    let discoveryApp = null;
-    let discoveryWrappers = [];
-    let discoveryTimer = null;
 
-    function cleanupGuideMethodDiscovery() {
-      discoveryWrappers.forEach(({ owner, name, descriptor: originalDescriptor, wrapper }) => {
-        try {
-          const currentDescriptor = Object.getOwnPropertyDescriptor(owner, name);
-          if (currentDescriptor && currentDescriptor.value === wrapper) {
-            Object.defineProperty(owner, name, originalDescriptor);
-          }
-        } catch (error) {
-          // A later YouTube update may have replaced the property already.
-        }
-      });
+    function findGuideApplyHandler(app) {
+      if (!app) return 'no-instance';
+      if (guideApplyHandler) return 'success:' + guideApplyHandler.name;
 
-      discoveryWrappers = [];
-      discoveryApp = null;
-
-      if (discoveryTimer !== null) {
-        clearInterval(discoveryTimer);
-        discoveryTimer = null;
-      }
-    }
-
-    function findGuidePayloadIndex(args) {
-      for (let i = 0; i < args.length; i += 1) {
-        const arg = args[i];
-        if (
-          arg &&
-          typeof arg === 'object' &&
-          Object.prototype.hasOwnProperty.call(arg, 'guideResponse')
-        ) {
-          return i;
-        }
-      }
-
-      return -1;
-    }
-
-    function installGuideMethodDiscovery() {
-      if (guideApplyHandler) return true;
-
-      const appElement = document.querySelector('ytlr-app');
-      const app = appElement && appElement.__instance;
-      if (!app) return false;
-
-      if (discoveryApp === app && discoveryWrappers.length) {
-        return true;
-      }
-
-      cleanupGuideMethodDiscovery();
-      discoveryApp = app;
-
+      const candidates = [];
+      const seenFunctions = new Set();
       let owner = app;
       let depth = 0;
 
@@ -90,66 +43,64 @@ if (!window.__ytafPreloadExecuted) {
             return;
           }
 
-          if (!methodDescriptor.configurable && !methodDescriptor.writable) {
+          const fn = methodDescriptor.value;
+          if (seenFunctions.has(fn)) return;
+          seenFunctions.add(fn);
+
+          let source;
+          try {
+            source = Function.prototype.toString.call(fn);
+          } catch (error) {
             return;
           }
 
-          const original = methodDescriptor.value;
-          const methodOwner = owner;
-          const wrapper = function (...args) {
-            if (!guideApplyHandler) {
-              const payloadIndex = findGuidePayloadIndex(args);
-              if (payloadIndex !== -1) {
-                guideApplyHandler = {
-                  fn: original,
-                  name,
-                  thisArg: this,
-                  payloadIndex,
-                  argsTemplate: args.slice(),
-                  payloadTemplate: args[payloadIndex]
-                };
+          if (!source.includes('guideResponse')) return;
 
-                cleanupGuideMethodDiscovery();
-              }
-            }
-
-            return original.apply(this, args);
-          };
-
-          try {
-            Object.defineProperty(methodOwner, name, {
-              ...methodDescriptor,
-              value: wrapper
-            });
-            discoveryWrappers.push({
-              owner: methodOwner,
-              name,
-              descriptor: methodDescriptor,
-              wrapper
-            });
-          } catch (error) {
-            // Some YouTube properties cannot be replaced even when their descriptor suggests it.
-          }
+          candidates.push({
+            fn,
+            name,
+            depth,
+            sourceLength: source.length
+          });
         });
 
         owner = Object.getPrototypeOf(owner);
         depth += 1;
       }
 
-      return discoveryWrappers.length > 0;
-    }
+      if (candidates.length === 0) {
+        return 'no-guide-handler';
+      }
 
-    function scheduleGuideMethodDiscovery() {
-      if (guideApplyHandler || discoveryTimer !== null) return;
+      // Prefer the most specific method on the instance/prototype and then the
+      // smallest implementation. We never modify the YouTube object while
+      // discovering candidates.
+      candidates.sort((a, b) => {
+        if (a.depth !== b.depth) return a.depth - b.depth;
+        return a.sourceLength - b.sourceLength;
+      });
 
-      if (installGuideMethodDiscovery()) return;
+      const best = candidates[0];
+      const equallySpecific = candidates.filter(
+        (candidate) => candidate.depth === best.depth
+      );
 
-      discoveryTimer = setInterval(() => {
-        if (guideApplyHandler || installGuideMethodDiscovery()) {
-          clearInterval(discoveryTimer);
-          discoveryTimer = null;
-        }
-      }, 50);
+      if (equallySpecific.length > 1) {
+        return (
+          'ambiguous-guide-handler:' +
+          equallySpecific
+            .slice(0, 6)
+            .map((candidate) => candidate.name)
+            .join(',')
+        );
+      }
+
+      guideApplyHandler = {
+        fn: best.fn,
+        name: best.name
+      };
+
+      return 'success:' + best.name;
     }
 
     function captureGuideResponse(value) {
@@ -159,10 +110,9 @@ if (!window.__ytafPreloadExecuted) {
         console.warn('[ytaf preload] Failed to preserve guide response', error);
       }
 
-      // JSON.parse returns before YouTube applies the parsed guide response. Installing
-      // the wrappers here lets us observe that first real application without relying
-      // on a minified method name such as app.K().
-      installGuideMethodDiscovery();
+      const appElement = document.querySelector('ytlr-app');
+      const app = appElement && appElement.__instance;
+      findGuideApplyHandler(app);
     }
 
     function applyGuideShortsState() {
@@ -176,9 +126,9 @@ if (!window.__ytafPreloadExecuted) {
         return 'no-instance';
       }
 
+      const discoveryResult = findGuideApplyHandler(app);
       if (!guideApplyHandler) {
-        scheduleGuideMethodDiscovery();
-        return 'no-guide-handler';
+        return discoveryResult;
       }
 
       let guideResponse;
@@ -193,20 +143,11 @@ if (!window.__ytafPreloadExecuted) {
         stripShortsFromBrowseResponse(guideResponse);
       }
 
-      const args = guideApplyHandler.argsTemplate.slice();
-      const payloadTemplate = guideApplyHandler.payloadTemplate;
-      const payload =
-        payloadTemplate && typeof payloadTemplate === 'object'
-          ? { ...payloadTemplate }
-          : {};
-      payload.guideResponse = guideResponse;
-      args[guideApplyHandler.payloadIndex] = payload;
-
       try {
-        guideApplyHandler.fn.apply(app, args);
+        guideApplyHandler.fn.call(app, { guideResponse });
       } catch (error) {
         console.error('[ytaf shorts] discovered guide apply handler threw', error);
-        return 'handler-threw';
+        return 'handler-threw:' + guideApplyHandler.name;
       }
 
       return 'success:' + guideApplyHandler.name;
@@ -259,8 +200,6 @@ if (!window.__ytafPreloadExecuted) {
     } else {
       JSON.parse = ytafParse;
     }
-
-    scheduleGuideMethodDiscovery();
   }
 
   console.info('[ytaf preload] Early hooks installed');
