@@ -19,6 +19,19 @@ if (!window.__ytafPreloadExecuted) {
     let originalGuideResponseJson = null;
     let guideApplyHandler = null;
 
+    const rendererLifecycleMethods = new Set([
+      'template',
+      'render',
+      'update',
+      'requestUpdate',
+      'performUpdate',
+      'firstUpdated',
+      'updated',
+      'connectedCallback',
+      'disconnectedCallback',
+      'attributeChangedCallback'
+    ]);
+
     function findGuideApplyHandler(app) {
       if (!app) return 'no-instance';
       if (guideApplyHandler) return 'success:' + guideApplyHandler.name;
@@ -30,7 +43,7 @@ if (!window.__ytafPreloadExecuted) {
 
       while (owner && owner !== Object.prototype && depth < 4) {
         Object.getOwnPropertyNames(owner).forEach((name) => {
-          if (name === 'constructor') return;
+          if (name === 'constructor' || rendererLifecycleMethods.has(name)) return;
 
           let methodDescriptor;
           try {
@@ -73,8 +86,9 @@ if (!window.__ytafPreloadExecuted) {
       }
 
       // Prefer the most specific method on the instance/prototype and then the
-      // smallest implementation. We never modify the YouTube object while
-      // discovering candidates.
+      // smallest implementation. Renderer/lifecycle methods are intentionally
+      // excluded above, because they may reference guideResponse without being
+      // the method that applies a guide response to application state.
       candidates.sort((a, b) => {
         if (a.depth !== b.depth) return a.depth - b.depth;
         return a.sourceLength - b.sourceLength;
