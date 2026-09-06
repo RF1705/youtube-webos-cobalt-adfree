@@ -90,7 +90,9 @@ if (!window.__ytafPreloadExecuted) {
             candidates.push({
               fn: target,
               name: targetName,
+              callerFn: caller,
               callerName,
+              callerArgc: caller.length,
               depth,
               callerSourceLength: source.length
             });
@@ -176,9 +178,13 @@ if (!window.__ytafPreloadExecuted) {
       }
 
       try {
-        guideApplyHandler.fn.call(app, { guideResponse });
+        if (guideApplyHandler.callerArgc === 1) {
+          guideApplyHandler.callerFn.call(app, guideResponse);
+        } else {
+          guideApplyHandler.fn.call(app, { guideResponse });
+        }
       } catch (error) {
-        console.error('[ytaf shorts] discovered guide apply handler threw', error);
+        console.error('[ytaf shorts] discovered guide apply path threw', error);
         return (
           'handler-threw:' +
           guideApplyHandler.callerName +
