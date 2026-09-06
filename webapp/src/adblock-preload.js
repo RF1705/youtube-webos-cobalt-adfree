@@ -19,59 +19,30 @@ if (!window.__ytafPreloadExecuted) {
     let originalGuideResponseJson = null;
     let guideApplyHandler = null;
 
-    const rendererLifecycleMethods = new Set([
-      'template',
-      'render',
-      'update',
-      'requestUpdate',
-      'performUpdate',
-      'firstUpdated',
-      'updated',
-      'connectedCallback',
-      'disconnectedCallback',
-      'attributeChangedCallback'
-    ]);
-
-    function describeHandlerSignature(handler) {
-      if (!handler) return 'unknown';
-
-      let source = handler.source;
-      if (!source) {
-        try {
-          source = Function.prototype.toString.call(handler.fn);
-        } catch (error) {
-          source = '';
-        }
-      }
-
-      const markerIndex = source.indexOf('guideResponse');
-      const start = markerIndex === -1 ? 0 : Math.max(0, markerIndex - 45);
-      const end = markerIndex === -1 ? 90 : Math.min(source.length, markerIndex + 70);
-      const context = source
-        .slice(start, end)
-        .replace(/\s+/g, ' ')
-        .replace(/\[/g, '(')
-        .replace(/\]/g, ')');
-
-      return 'argc=' + handler.fn.length + ' src=' + context;
-    }
-
     function findGuideApplyHandler(app) {
       if (!app) return 'no-instance';
-      if (guideApplyHandler) return 'success:' + guideApplyHandler.name;
+      if (guideApplyHandler) {
+        return (
+          'success:' +
+          guideApplyHandler.callerName +
+          '->' +
+          guideApplyHandler.name
+        );
+      }
 
       const candidates = [];
+      const seenTargets = new Set();
       const seenFunctions = new Set();
       let owner = app;
       let depth = 0;
 
-      while (owner && owner !== Object.prototype && depth < 4) {
-        Object.getOwnPropertyNames(owner).forEach((name) => {
-          if (name === 'constructor' || rendererLifecycleMethods.has(name)) return;
+      while (owner && owner !== Object.prototype && depth < 5) {
+        Object.getOwnPropertyNames(owner).forEach((callerName) => {
+          if (callerName === 'constructor') return;
 
           let methodDescriptor;
           try {
-            methodDescriptor = Object.getOwnPropertyDescriptor(owner, name);
+            methodDescriptor = Object.getOwnPropertyDescriptor(owner, callerName);
           } catch (error) {
             return;
           }
@@ -80,25 +51,49 @@ if (!window.__ytafPreloadExecuted) {
             return;
           }
 
-          const fn = methodDescriptor.value;
-          if (seenFunctions.has(fn)) return;
-          seenFunctions.add(fn);
+          const caller = methodDescriptor.value;
+          if (seenFunctions.has(caller)) return;
+          seenFunctions.add(caller);
 
           let source;
           try {
-            source = Function.prototype.toString.call(fn);
+            source = Function.prototype.toString.call(caller);
           } catch (error) {
             return;
           }
 
-          if (!source.includes('guideResponse')) return;
+          const targetNames = [];
+          const dotCallPattern =
+            /this\.([A-Za-z_$][\w$]*)\s*\(\s*\{\s*guideResponse\s*:/g;
+          const bracketCallPattern =
+            /this\[['"]([^'"]+)['"]\]\s*\(\s*\{\s*guideResponse\s*:/g;
 
-          candidates.push({
-            fn,
-            name,
-            depth,
-            sourceLength: source.length,
-            source
+          let match;
+          while ((match = dotCallPattern.exec(source)) !== null) {
+            targetNames.push(match[1]);
+          }
+          while ((match = bracketCallPattern.exec(source)) !== null) {
+            targetNames.push(match[1]);
+          }
+
+          targetNames.forEach((targetName) => {
+            let target;
+            try {
+              target = app[targetName];
+            } catch (error) {
+              return;
+            }
+
+            if (typeof target !== 'function' || seenTargets.has(target)) return;
+            seenTargets.add(target);
+
+            candidates.push({
+              fn: target,
+              name: targetName,
+              callerName,
+              depth,
+              callerSourceLength: source.length
+            });
           });
         });
 
@@ -112,12 +107,14 @@ if (!window.__ytafPreloadExecuted) {
 
       candidates.sort((a, b) => {
         if (a.depth !== b.depth) return a.depth - b.depth;
-        return a.sourceLength - b.sourceLength;
+        return a.callerSourceLength - b.callerSourceLength;
       });
 
       const best = candidates[0];
       const equallySpecific = candidates.filter(
-        (candidate) => candidate.depth === best.depth
+        (candidate) =>
+          candidate.depth === best.depth &&
+          candidate.callerSourceLength === best.callerSourceLength
       );
 
       if (equallySpecific.length > 1) {
@@ -125,18 +122,17 @@ if (!window.__ytafPreloadExecuted) {
           'ambiguous-guide-handler:' +
           equallySpecific
             .slice(0, 6)
-            .map((candidate) => candidate.name)
+            .map(
+              (candidate) =>
+                candidate.callerName + '->' + candidate.name
+            )
             .join(',')
         );
       }
 
-      guideApplyHandler = {
-        fn: best.fn,
-        name: best.name,
-        source: best.source
-      };
+      guideApplyHandler = best;
 
-      return 'success:' + best.name;
+      return 'success:' + best.callerName + '->' + best.name;
     }
 
     function captureGuideResponse(value) {
@@ -185,13 +181,18 @@ if (!window.__ytafPreloadExecuted) {
         console.error('[ytaf shorts] discovered guide apply handler threw', error);
         return (
           'handler-threw:' +
-          guideApplyHandler.name +
-          ' ' +
-          describeHandlerSignature(guideApplyHandler)
+          guideApplyHandler.callerName +
+          '->' +
+          guideApplyHandler.name
         );
       }
 
-      return 'success:' + guideApplyHandler.name;
+      return (
+        'success:' +
+        guideApplyHandler.callerName +
+        '->' +
+        guideApplyHandler.name
+      );
     }
 
     window.__ytafApplyShortsState = applyGuideShortsState;
