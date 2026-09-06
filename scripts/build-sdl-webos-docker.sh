@@ -128,6 +128,9 @@ docker run --rm --platform linux/amd64 \
 
     cmake -S /src -B /build -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE="'"$toolchain_file"'" \
+      -DWAYLAND_SCANNER=/usr/bin/wayland-scanner \
+      -DGAWK=/usr/bin/gawk \
+      -DSDL_CCACHE=OFF \
       -DCMAKE_INSTALL_PREFIX=/out \
       -DCMAKE_BUILD_TYPE=Release \
       -DWEBOS=ON \

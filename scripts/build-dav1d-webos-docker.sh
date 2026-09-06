@@ -40,6 +40,10 @@ if [[ ! -x "$meson" ]]; then
       --no-warn-script-location --target /code/out/python-tools meson==0.63.3
 fi
 
+# Create the build directory on the host so it remains writable by the invoking
+# user after Meson/Ninja populate it from the root-running Docker container.
+mkdir -p "$build_dir"
+
 if [[ ! -f "$build_dir/build.ninja" ]]; then
   docker run --rm --platform linux/amd64 \
     -v "$repo_root:/workspace:ro" \

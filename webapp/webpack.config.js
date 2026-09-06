@@ -42,6 +42,7 @@ module.exports = (env) => {
       },
 
       entry: {
+        adblockPreload: './src/adblock-preload.js',
         adblockMain: './src/adblock-main.js'
       },
       output: {
