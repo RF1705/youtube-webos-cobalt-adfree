@@ -32,6 +32,30 @@ if (!window.__ytafPreloadExecuted) {
       'attributeChangedCallback'
     ]);
 
+    function describeHandlerSignature(handler) {
+      if (!handler) return 'unknown';
+
+      let source = handler.source;
+      if (!source) {
+        try {
+          source = Function.prototype.toString.call(handler.fn);
+        } catch (error) {
+          source = '';
+        }
+      }
+
+      const markerIndex = source.indexOf('guideResponse');
+      const start = markerIndex === -1 ? 0 : Math.max(0, markerIndex - 45);
+      const end = markerIndex === -1 ? 90 : Math.min(source.length, markerIndex + 70);
+      const context = source
+        .slice(start, end)
+        .replace(/\s+/g, ' ')
+        .replace(/\[/g, '(')
+        .replace(/\]/g, ')');
+
+      return 'argc=' + handler.fn.length + ' src=' + context;
+    }
+
     function findGuideApplyHandler(app) {
       if (!app) return 'no-instance';
       if (guideApplyHandler) return 'success:' + guideApplyHandler.name;
@@ -73,7 +97,8 @@ if (!window.__ytafPreloadExecuted) {
             fn,
             name,
             depth,
-            sourceLength: source.length
+            sourceLength: source.length,
+            source
           });
         });
 
@@ -85,10 +110,6 @@ if (!window.__ytafPreloadExecuted) {
         return 'no-guide-handler';
       }
 
-      // Prefer the most specific method on the instance/prototype and then the
-      // smallest implementation. Renderer/lifecycle methods are intentionally
-      // excluded above, because they may reference guideResponse without being
-      // the method that applies a guide response to application state.
       candidates.sort((a, b) => {
         if (a.depth !== b.depth) return a.depth - b.depth;
         return a.sourceLength - b.sourceLength;
@@ -111,7 +132,8 @@ if (!window.__ytafPreloadExecuted) {
 
       guideApplyHandler = {
         fn: best.fn,
-        name: best.name
+        name: best.name,
+        source: best.source
       };
 
       return 'success:' + best.name;
@@ -161,7 +183,12 @@ if (!window.__ytafPreloadExecuted) {
         guideApplyHandler.fn.call(app, { guideResponse });
       } catch (error) {
         console.error('[ytaf shorts] discovered guide apply handler threw', error);
-        return 'handler-threw:' + guideApplyHandler.name;
+        return (
+          'handler-threw:' +
+          guideApplyHandler.name +
+          ' ' +
+          describeHandlerSignature(guideApplyHandler)
+        );
       }
 
       return 'success:' + guideApplyHandler.name;
