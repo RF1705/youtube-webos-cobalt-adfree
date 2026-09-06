@@ -398,12 +398,20 @@ ifneq ("$(PACKAGE_NAME_TARGET)","$(PACKAGE_NAME_OFFICIAL)")
 	find $(WORKDIR)/ipk -name '*.bak' -delete
 endif
 
-	libcobalt=$$(find $(WORKDIR)/ipk -name libcobalt.so -print -quit); \
-	if test -z "$$libcobalt"; then \
-		libcobalt="$(WORKDIR)/ipk/content/app/cobalt/lib/libcobalt.so"; \
-		mkdir -p "$$(dirname "$$libcobalt")"; \
-	fi; \
-	cp $(WORKDIR)/cobalt/libcobalt.so "$$libcobalt"
+	libcobalt_lz4=$$(find $(WORKDIR)/ipk -name libcobalt.lz4 -print -quit); \
+	if test -n "$$libcobalt_lz4"; then \
+		command -v lz4 >/dev/null 2>&1 || { echo "lz4 is required for compressed Cobalt packages"; exit 1; }; \
+		lz4 -q -f --content-size -9 "$(WORKDIR)/cobalt/libcobalt.so" "$$libcobalt_lz4" && \
+			lz4 -q -t "$$libcobalt_lz4"; \
+	else \
+		grep -q -- '--evergreen_lite' $(WORKDIR)/ipk/switches || echo " --evergreen_lite" >> $(WORKDIR)/ipk/switches; \
+		libcobalt=$$(find $(WORKDIR)/ipk -name libcobalt.so -print -quit); \
+		if test -z "$$libcobalt"; then \
+			libcobalt="$(WORKDIR)/ipk/content/app/cobalt/lib/libcobalt.so"; \
+			mkdir -p "$$(dirname "$$libcobalt")"; \
+		fi; \
+		cp $(WORKDIR)/cobalt/libcobalt.so "$$libcobalt"; \
+	fi
 	cp -r $(WORKDIR)/cobalt/content $(WORKDIR)/ipk/content/app/cobalt
 	mkdir -p $(WORKDIR)/ipk/content/app/cobalt/content/web/adblock
 	mkdir -p $(WORKDIR)/ipk/content/app/cobalt/content/web/adblock
