@@ -94,6 +94,10 @@ STANDALONE_POC_RUNTIME_SOURCE?=cobalt-bin/$(STANDALONE_POC_COBALT_VERSION)
 STANDALONE_POC_COBALT_DIR?=$(WORKDIR)/standalone-poc-cobalt/$(STANDALONE_POC_COBALT_VERSION)
 STANDALONE_POC_STARTER_SOURCE?=workdir/ipk/cobalt
 
+TV_HOST?=
+STOCK_OVERLAY_APP_ID?=$(PACKAGE_NAME_OFFICIAL)
+STOCK_OVERLAY_PAYLOAD?=$(WORKDIR)/ipk
+
 
 .PHONY: all
 all: images
@@ -118,6 +122,12 @@ help:
 	@echo "To check the standalone runtime files, use:"
 	@echo "  make standalone-runtime-status"
 	@echo ""
+	@echo "On rooted webOS 11+ TVs, preserve the signed Store app and overlay"
+	@echo "an already-prepared matching Cobalt payload with:"
+	@echo "  make install-stock-overlay TV_HOST=root@tv"
+	@echo "Restore the most recent pre-overlay backup with:"
+	@echo "  make rollback-stock-overlay TV_HOST=root@tv"
+	@echo ""
 	@echo "By default it creates a separate app:"
 	@echo "  id:   $(PACKAGE_NAME_TARGET)"
 	@echo "  name: $(PACKAGE_DISPLAY_NAME)"
@@ -125,6 +135,21 @@ help:
 	@echo "To overwrite the official YouTube app instead, pass:"
 	@echo "  PACKAGE_NAME=$(PACKAGE_NAME_OFFICIAL)"
 	@echo ""
+
+.PHONY: install-stock-overlay
+install-stock-overlay:
+	@test -n "$(TV_HOST)" || (echo "TV_HOST is required, for example TV_HOST=root@tv" >&2; exit 2)
+	scripts/install-stock-overlay.sh \
+	  --tv "$(TV_HOST)" \
+	  --app-id "$(STOCK_OVERLAY_APP_ID)" \
+	  --payload "$(STOCK_OVERLAY_PAYLOAD)"
+
+.PHONY: rollback-stock-overlay
+rollback-stock-overlay:
+	@test -n "$(TV_HOST)" || (echo "TV_HOST is required, for example TV_HOST=root@tv" >&2; exit 2)
+	scripts/rollback-stock-overlay.sh \
+	  --tv "$(TV_HOST)" \
+	  --app-id "$(STOCK_OVERLAY_APP_ID)"
 
 .PHONY: ares-install
 ares-install:

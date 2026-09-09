@@ -152,6 +152,12 @@ starter from a working stock YouTube installation. See the
 Download the package matching your device from the release page and install it
 using one of the following methods.
 
+On newer rooted TVs where a developer-signed native IPK installs but does not
+register or launch, keep LG's signed Store application installed and apply only
+the matching patched Cobalt runtime and assets. See the
+[rooted signed-Store overlay guide](docs/rooted-stock-overlay.md). This method
+does not uninstall or replace the Store app registration.
+
 ### Standard package
 
 Use this package for the standard `youtube.leanback.v4` application:

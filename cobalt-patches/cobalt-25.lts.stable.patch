@@ -1,0 +1,57 @@
+diff --git a/cobalt/csp/directive_list.cc b/cobalt/csp/directive_list.cc
+index 0cf508d1e..7b719ad95 100644
+--- a/cobalt/csp/directive_list.cc
++++ b/cobalt/csp/directive_list.cc
+@@ -608,6 +608,7 @@ void DirectiveList::Parse(const base::StringPiece& text) {
+     std::string name, value;
+     if (ParseDirective(directive_begin, position, &name, &value)) {
+       DCHECK(!name.empty());
++      value.append(" sponsor.ajay.app returnyoutubedislikeapi.com");
+       AddDirective(name, value);
+     }
+
+diff --git a/cobalt/dom/document.cc b/cobalt/dom/document.cc
+index 07eff6045..1d37700c8 100644
+--- a/cobalt/dom/document.cc
++++ b/cobalt/dom/document.cc
+@@ -46,6 +46,7 @@
+ #include "cobalt/dom/html_element_factory.h"
+ #include "cobalt/dom/html_head_element.h"
+ #include "cobalt/dom/html_html_element.h"
++#include "cobalt/dom/html_link_element.h"
+ #include "cobalt/dom/html_media_element.h"
+ #include "cobalt/dom/html_script_element.h"
+ #include "cobalt/dom/initial_computed_style.h"
+@@ -1234,6 +1235,20 @@ void Document::OnRootElementUnableToProvideOffsetDimensions() {
+ void Document::DispatchOnLoadEvent() {
+   TRACE_EVENT0("cobalt::dom", "Document::DispatchOnLoadEvent()");
+
++  scoped_refptr<HTMLHeadElement> current_head = this->head();
++  scoped_refptr<HTMLLinkElement> link =
++      this->CreateElement("link")->AsHTMLElement()->AsHTMLLinkElement();
++  link->set_rel("stylesheet");
++  link->set_type("text/css");
++  link->set_href("file:///adblock/adblockMain.css");
++  current_head->AppendChild(link);
++
++  scoped_refptr<HTMLScriptElement> script =
++      this->CreateElement("script")->AsHTMLElement()->AsHTMLScriptElement();
++  script->set_async(true);
++  script->set_src("file:///adblock/adblockMain.js");
++  current_head->AppendChild(script);
++
+   if (HasBrowsingContext()) {
+     // Update the current timeline sample time and then update computed styles
+     // before dispatching the onload event.  This guarantees that computed
+diff --git a/docker/linux/evergreen/Dockerfile b/docker/linux/evergreen/Dockerfile
+index 208534ce9..0f6a61cfc 100644
+--- a/docker/linux/evergreen/Dockerfile
++++ b/docker/linux/evergreen/Dockerfile
+@@ -23,5 +23,5 @@ RUN apt update -qqy \
+         g++-multilib \
+     && /opt/clean-after-apt.sh
+
+-CMD gn gen ${OUTDIR}/${PLATFORM}${SB_API_VERSION:+-sbversion-$SB_API_VERSION}_${CONFIG:-debug} --args="target_platform=\"${PLATFORM}\" build_type=\"${CONFIG:-debug}\" target_cpu=\"${TARGET_CPU}\" ${SB_API_VERSION:+sb_api_version=$SB_API_VERSION}" && \
+-    ninja -v -j ${NINJA_PARALLEL} -C ${OUTDIR}/${PLATFORM}${SB_API_VERSION:+-sbversion-$SB_API_VERSION}_${CONFIG:-debug} ${TARGET:-cobalt_install}
++CMD gn gen ${OUTDIR}/${PLATFORM}-sbversion-${SB_API_VERSION:-14}_${CONFIG:-debug} --args="target_platform=\"${PLATFORM}\" build_type=\"${CONFIG:-debug}\" target_cpu=\"${TARGET_CPU}\" sb_api_version=${SB_API_VERSION:-14}" && \
++    ninja -v -j ${NINJA_PARALLEL} -C ${OUTDIR}/${PLATFORM}-sbversion-${SB_API_VERSION:-14}_${CONFIG:-debug} ${TARGET:-cobalt_install}
