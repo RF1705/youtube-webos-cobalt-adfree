@@ -6,6 +6,7 @@ import {
   sponsorBlockCategoryConfig as categoryConfig,
   sponsorBlockCategoryColors as categoryColors
 } from './sponsorblock-categories.js';
+import { getSponsorBlockSkipTarget } from './sponsorblock-skip-target.mjs';
 
 const sponsorblockAPI = 'https://sponsor.ajay.app/api';
 const markerAttribute = 'data-ytaf-sponsorblock-marker';
@@ -782,8 +783,12 @@ class SponsorBlockController {
     if (this.skipped[key]) return;
     this.skipped[key] = true;
 
-    const skipTo = Math.min(activeSegment.segment[1] + 0.01, this.video.duration || activeSegment.segment[1]);
-    this.video.currentTime = skipTo;
+    const skipTo = getSponsorBlockSkipTarget(
+      activeSegment.segment[1] + 0.01,
+      this.video.duration,
+      currentTime
+    );
+    if (skipTo !== null) this.video.currentTime = skipTo;
     this.lastSkipText = `${activeSegment.category} ${activeSegment.segment[0].toFixed(
       1
     )}-${activeSegment.segment[1].toFixed(1)}`;
@@ -822,7 +827,16 @@ class SponsorBlockController {
       this.lastSkipText = `${activeSegments[0].category} ${start.toFixed(
         1
       )}-${skipEnd.toFixed(1)}`;
-      this.video.currentTime = skipEnd;
+      activeSegments.forEach((activeSegment) => {
+        const key = `${activeSegment.category}:${activeSegment.segment[0]}:${activeSegment.segment[1]}`;
+        this.skipped[key] = true;
+      });
+      const skipTo = getSponsorBlockSkipTarget(
+        skipEnd,
+        this.video.duration,
+        this.video.currentTime
+      );
+      if (skipTo !== null) this.video.currentTime = skipTo;
       showNotification(`${text('sponsorBlock', 'skipping')} ${categoryLabel(activeSegments[0].category)}`, 1600, 'yellow');
       this.scheduleSkip();
     }, delay);
@@ -841,6 +855,7 @@ class SponsorBlockController {
       .filter(
         (segment) =>
           this.isSegmentSkippable(segment) &&
+          !this.skipped[`${segment.category}:${segment.segment[0]}:${segment.segment[1]}`] &&
           segment.segment[0] > currentTime - 0.3 &&
           segment.segment[1] > currentTime - 0.3
       )
@@ -854,6 +869,7 @@ class SponsorBlockController {
       .filter(
         (segment) =>
           this.isSegmentSkippable(segment) &&
+          !this.skipped[`${segment.category}:${segment.segment[0]}:${segment.segment[1]}`] &&
           segment.segment[0] <= currentTime + 0.3 &&
           segment.segment[1] > currentTime - 0.3
       )
