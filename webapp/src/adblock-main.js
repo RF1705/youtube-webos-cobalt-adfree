@@ -6,7 +6,7 @@ import './domrect-polyfill';
 import './json-stringify-hook';
 import './ui.js';
 
-import { handleInitialLaunch, handleLaunch, waitForChildAdd } from './utils';
+import { handleInitialLaunch, handleRelaunch, waitForChildAdd } from './utils';
 import { configRead } from './config.js';
 import { userScriptStartUI } from './ui.js';
 import { userScriptStartSponsoredQrCodeUI } from './sponsored-qr-code-ui.js';
@@ -25,7 +25,7 @@ document.addEventListener(
   (evt) => {
     console.info('RELAUNCH:', evt, window.launchParams);
     resetAutoLogin();
-    handleLaunch(evt.detail);
+    handleRelaunch(evt.detail);
   },
   true
 );

@@ -13,8 +13,11 @@ const STARTUP_PAGE_ENDPOINTS = {
   library: { browseId: 'FElibrary' }
 };
 const STARTUP_PAGE_RETRY_INTERVAL_MS = 250;
-const STARTUP_PAGE_MAX_ATTEMPTS = 80;
+// A cold TV boot can take considerably longer than an ordinary app launch to
+// restore the account and populate the guide. Keep retrying for two minutes.
+const STARTUP_PAGE_MAX_ATTEMPTS = 480;
 let startupPageApplied = false;
+let startupPageRun = 0;
 
 export function getStartupPageUrl(page = configRead('startupPage')) {
   const browseId = STARTUP_PAGE_ENDPOINTS[page] &&
@@ -91,8 +94,25 @@ export function handleLaunch(params) {
   window.location.href = href;
 }
 
-export function handleInitialLaunch() {
-  const params = extractLaunchParams();
+export function handleRelaunch(params = {}) {
+  startupPageRun += 1;
+  startupPageApplied = false;
+
+  if (params.target !== undefined || params.contentTarget !== undefined) {
+    handleLaunch(params);
+    return;
+  }
+
+  if (configRead('startupPage') === 'home') {
+    handleLaunch(params);
+    return;
+  }
+
+  handleInitialLaunch(params);
+}
+
+export function handleInitialLaunch(launchParams) {
+  const params = launchParams || extractLaunchParams();
   if (params.target !== undefined || params.contentTarget !== undefined) {
     return;
   }
@@ -101,8 +121,10 @@ export function handleInitialLaunch() {
   const startupEndpoint = STARTUP_PAGE_ENDPOINTS[page];
   if (!startupEndpoint || startupPageApplied) return;
 
+  const run = ++startupPageRun;
   let attempts = 0;
   const applyStartupPage = () => {
+    if (run !== startupPageRun || startupPageApplied) return;
     attempts += 1;
 
     const renderers = document.querySelectorAll('ytlr-guide-entry-renderer');
