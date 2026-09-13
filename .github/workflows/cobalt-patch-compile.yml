@@ -1,0 +1,129 @@
+name: Cobalt SB13 compile
+
+on:
+  pull_request:
+    paths:
+      - 'cobalt-patches/cobalt-23.lts.6.patch'
+      - 'webapp/src/**'
+      - 'webapp/webpack.config.js'
+      - '.github/workflows/cobalt-patch-compile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cobalt-sb13-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Cobalt 23.lts.6 / SB13
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      BUILD_PARALLEL: '4'
+      SB_API_VERSION: '13'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils \
+            findutils \
+            git \
+            jq \
+            make \
+            patch \
+            rename \
+            sed \
+            squashfs-tools \
+            xz-utils
+
+          if ! command -v docker-compose >/dev/null 2>&1; then
+            printf '%s\n' '#!/bin/sh' 'exec docker compose "$@"' |
+              sudo tee /usr/local/bin/docker-compose >/dev/null
+            sudo chmod +x /usr/local/bin/docker-compose
+          fi
+
+          docker-compose version
+
+      - name: Validate preload patch
+        run: |
+          grep -F 'adblockPreload.js' cobalt-patches/cobalt-23.lts.6.patch
+          grep -F 'ReadYtafPreloadScript' cobalt-patches/cobalt-23.lts.6.patch
+          grep -F 'Early preload completed' cobalt-patches/cobalt-23.lts.6.patch
+
+      - name: Prepare patched Cobalt source
+        run: |
+          mkdir -p output workdir
+          git clone --depth 1 --branch 23.lts.6 \
+            https://github.com/youtube/cobalt.git \
+            workdir/cobalt-23.lts.6
+
+          git -C workdir/cobalt-23.lts.6 apply --check --recount \
+            "$GITHUB_WORKSPACE/cobalt-patches/cobalt-23.lts.6.patch"
+          git -C workdir/cobalt-23.lts.6 apply --recount \
+            "$GITHUB_WORKSPACE/cobalt-patches/cobalt-23.lts.6.patch"
+          touch workdir/cobalt-23.lts.6/.patched
+
+      - name: Build Cobalt container images
+        run: |
+          (
+            cd workdir/cobalt-23.lts.6
+            export NINJA_PARALLEL="$BUILD_PARALLEL"
+            export SB_API_VERSION=13
+            docker-compose build base
+            docker-compose build build-base
+            docker-compose build build-evergreen
+          ) 2>&1 | tee output/cobalt-sb13-build.log
+
+      - name: Compile patched Cobalt runtime
+        run: |
+          make cobalt-bin/23.lts.6-13/libcobalt.so \
+            BUILD_COBALT_PARALLEL="$BUILD_PARALLEL" \
+            2>&1 | tee -a output/cobalt-sb13-build.log
+
+          test -s cobalt-bin/23.lts.6-13/libcobalt.so
+
+      - name: Verify preload bundle in runtime content
+        run: |
+          test -s cobalt-bin/23.lts.6-13/content/web/adblock/adblockPreload.js
+          test -s cobalt-bin/23.lts.6-13/content/web/adblock/adblockMain.js
+
+      - name: Archive patched Cobalt runtime
+        run: |
+          make cobalt-bin/23.lts.6-13.xz
+          test -s cobalt-bin/23.lts.6-13.xz
+
+      - name: Upload Cobalt runtime archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobalt-23.lts.6-sb13-runtime
+          path: cobalt-bin/23.lts.6-13.xz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Cobalt runtime files
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobalt-23.lts.6-sb13-preload-test
+          path: |
+            cobalt-bin/23.lts.6-13/libcobalt.so
+            cobalt-bin/23.lts.6-13/content/web/adblock/adblockPreload.js
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Cobalt build log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobalt-sb13-build-log
+          path: output/cobalt-sb13-build.log
+          if-no-files-found: warn
+          retention-days: 14
