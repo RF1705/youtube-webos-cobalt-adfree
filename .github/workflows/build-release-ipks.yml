@@ -85,6 +85,7 @@ jobs:
             squashfs-tools \
             rename \
             findutils \
+            lz4 \
             xz-utils \
             python3
 

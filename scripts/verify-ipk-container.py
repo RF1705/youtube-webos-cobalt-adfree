@@ -8,10 +8,15 @@ import io
 from pathlib import Path
 import tarfile
 
-
 AR_MAGIC = b"!<arch>\n"
 AR_HEADER_SIZE = 60
 EXPECTED_MEMBERS = ("debian-binary", "control.tar.gz", "data.tar.gz")
+LZ4_FRAME_MAGIC = b"\x04\x22\x4d\x18"
+LZ4_FLAGS_OFFSET = len(LZ4_FRAME_MAGIC)
+LZ4_CONTENT_SIZE_OFFSET = LZ4_FLAGS_OFFSET + 2
+LZ4_CONTENT_SIZE_LENGTH = 8
+LZ4_CONTENT_SIZE_FLAG = 0x08
+LZ4_CONTENT_SIZE_HEADER_LENGTH = LZ4_CONTENT_SIZE_OFFSET + LZ4_CONTENT_SIZE_LENGTH
 
 
 def parse_decimal(field: bytes, label: str) -> int:
@@ -63,7 +68,28 @@ def read_members(package: Path) -> dict[str, tuple[int, bytes]]:
 def verify_tar(name: str, contents: bytes) -> None:
     try:
         with tarfile.open(fileobj=io.BytesIO(contents), mode="r:gz") as archive:
-            archive.getmembers()
+            members = archive.getmembers()
+            if name == "data.tar.gz":
+                for member in members:
+                    if not member.isfile() or Path(member.name).name != "libcobalt.lz4":
+                        continue
+                    runtime = archive.extractfile(member)
+                    if runtime is None:
+                        raise ValueError(f"Could not read {member.name}")
+                    header = runtime.read(LZ4_CONTENT_SIZE_HEADER_LENGTH)
+                    if (
+                        len(header) < LZ4_CONTENT_SIZE_OFFSET
+                        or header[:LZ4_FLAGS_OFFSET] != LZ4_FRAME_MAGIC
+                    ):
+                        raise ValueError(f"Invalid {member.name}: invalid LZ4 frame")
+                    if not header[LZ4_FLAGS_OFFSET] & LZ4_CONTENT_SIZE_FLAG:
+                        raise ValueError(
+                            f"Invalid {member.name}: missing LZ4 content size"
+                        )
+                    if len(header) < LZ4_CONTENT_SIZE_HEADER_LENGTH:
+                        raise ValueError(
+                            f"Invalid {member.name}: truncated LZ4 content size"
+                        )
     except (tarfile.TarError, OSError) as error:
         raise ValueError(f"Invalid {name}: {error}") from error
 
