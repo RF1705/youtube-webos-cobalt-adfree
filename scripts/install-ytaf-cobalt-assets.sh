@@ -10,7 +10,7 @@ content_target="$cobalt_root/cobalt/adblock/content"
 content_build="$content_target/BUILD.gn"
 web_module="$cobalt_root/cobalt/browser/web_module.cc"
 
-if [[ ! -d "$cobalt_root/.git" ]]; then
+if ! git -C "$cobalt_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "Not a Cobalt source tree: $cobalt_root" >&2
   exit 2
 fi

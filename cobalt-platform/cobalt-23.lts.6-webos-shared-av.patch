@@ -1,0 +1,145 @@
+--- a/starboard/linux/shared/player_components_factory.cc
++++ b/starboard/linux/shared/player_components_factory.cc
+@@ -39,6 +39,7 @@
+ #include "starboard/shared/starboard/player/filter/video_render_algorithm_impl.h"
+ #include "starboard/shared/starboard/player/filter/video_renderer_sink.h"
+ #include "starboard/webos/arm/starfish_video_decoder.h"
++#include "starboard/webos/arm/starfish_av_components.h"
+ 
+ namespace starboard {
+ namespace shared {
+@@ -52,6 +53,16 @@
+ 
+ class PlayerComponentsFactory : public PlayerComponents::Factory {
+  public:
++  scoped_ptr<PlayerComponents> CreateComponents(
++      const CreationParameters& parameters, std::string* error_message) override {
++    scoped_ptr<PlayerComponents> components;
++    if (::starboard::shared::webos::TryCreateStarfishAvComponents(
++            parameters, &components, error_message)) {
++      return components.Pass();
++    }
++    return PlayerComponents::Factory::CreateComponents(parameters, error_message);
++  }
++
+   bool CreateSubComponents(
+       const CreationParameters& creation_parameters,
+       scoped_ptr<AudioDecoder>* audio_decoder,
+--- a/starboard/player.h
++++ b/starboard/player.h
+@@ -131,6 +131,10 @@
+   // The first 8 bytes of the data contains the value of BlockAddID in big
+   // endian format, followed by the content of BlockAdditional.
+   kMatroskaBlockAdditional,
++#if defined(STARBOARD_WEBOS)
++  // Private metadata used only by the shared Starfish A/V backend on webOS.
++  kWebosStarfishAudioTiming = 0x59544146,
++#endif
+ } SbPlayerSampleSideDataType;
+ 
+ // Side data accompanied with |SbPlayerSampleInfo|, it can be arbitrary binary
+--- a/starboard/shared/starboard/player/input_buffer_internal.h
++++ b/starboard/shared/starboard/player/input_buffer_internal.h
+@@ -45,6 +45,11 @@
+   int size() const { return size_; }
+ 
+   const std::vector<uint8_t>& side_data() const { return side_data_; }
++#if defined(STARBOARD_WEBOS)
++  const std::vector<uint8_t>& webos_audio_timing() const {
++    return webos_audio_timing_;
++  }
++#endif
+ 
+   SbTime timestamp() const { return timestamp_; }
+   const SbMediaAudioSampleInfo& audio_sample_info() const {
+@@ -74,6 +79,9 @@
+   const uint8_t* data_;
+   int size_;
+   std::vector<uint8_t> side_data_;
++#if defined(STARBOARD_WEBOS)
++  std::vector<uint8_t> webos_audio_timing_;
++#endif
+   SbTime timestamp_;
+ 
+   media::AudioSampleInfo audio_sample_info_;
+--- a/starboard/shared/starboard/player/input_buffer_internal.cc
++++ b/starboard/shared/starboard/player/input_buffer_internal.cc
+@@ -49,16 +49,21 @@
+     video_sample_info_ = sample_info.video_sample_info;
+   }
+   TryToAssignDrmSampleInfo(sample_info.drm_info);
+-  if (sample_info.side_data_count > 0) {
+-    SB_DCHECK(sample_info.side_data_count == 1);
++  for (int i = 0; i < sample_info.side_data_count; ++i) {
+     SB_DCHECK(sample_info.side_data);
+-    SB_DCHECK(sample_info.side_data->type == kMatroskaBlockAdditional);
+-    SB_DCHECK(sample_info.side_data->data);
++    const auto& side_data = sample_info.side_data[i];
++    SB_DCHECK(side_data.data);
++#if defined(STARBOARD_WEBOS)
++    if (side_data.type == kWebosStarfishAudioTiming) {
++      webos_audio_timing_.assign(side_data.data, side_data.data + side_data.size);
++      continue;
++    }
++#endif
++    SB_DCHECK(side_data.type == kMatroskaBlockAdditional);
+     // Make a copy anyway as it is possible to release |data_| earlier in
+     // SetDecryptedContent().
+     side_data_.assign(
+-        sample_info.side_data->data,
+-        sample_info.side_data->data + sample_info.side_data->size);
++        side_data.data, side_data.data + side_data.size);
+   }
+ }
+ 
+--- a/cobalt/media/base/sbplayer_bridge.cc
++++ b/cobalt/media/base/sbplayer_bridge.cc
+@@ -29,6 +29,9 @@
+ #include "starboard/common/media.h"
+ #include "starboard/common/string.h"
+ #include "starboard/configuration.h"
++#if defined(STARBOARD_WEBOS)
++#include "starboard/webos/arm/starfish_audio_timing.h"
++#endif
+ #include "starboard/memory.h"
+ #include "starboard/once.h"
+ #include "third_party/chromium/media/base/starboard_utils.h"
+@@ -723,6 +726,12 @@
+   gathered_sbplayer_sample_infos_drm_info.reserve(buffers.size());
+   gathered_sbplayer_sample_infos_subsample_mapping.reserve(buffers.size());
+   gathered_sbplayer_sample_infos_side_data.reserve(buffers.size());
++#if defined(STARBOARD_WEBOS)
++  // Fixed-size storage keeps all pointers valid until WriteSample copies them.
++  using WebosAudioTiming = ::starboard::shared::webos::StarfishAudioTiming;
++  std::vector<WebosAudioTiming::Wire> webos_timing(buffers.size());
++  std::vector<std::array<SbPlayerSampleSideData, 2>> webos_side_data(buffers.size());
++#endif
+ 
+   for (int i = 0; i < buffers.size(); i++) {
+     const auto& buffer = buffers[i];
+@@ -798,6 +807,25 @@
+ 
+     if (sample_type == kSbMediaTypeAudio) {
+       sample_info.audio_sample_info = audio_sample_info_;
++#if defined(STARBOARD_WEBOS)
++      if (audio_sample_info_.codec == kSbMediaAudioCodecOpus) {
++        WebosAudioTiming timing;
++        timing.codec_delay_samples = audio_config_.codec_delay();
++        timing.seek_preroll_us = audio_config_.seek_preroll().InMicroseconds();
++        timing.discard_front_us = buffer->discard_padding().first.InMicroseconds();
++        timing.discard_back_us = buffer->discard_padding().second.InMicroseconds();
++        timing.duration_us = buffer->duration().InMicroseconds();
++        webos_timing[i] = timing.Encode();
++        int count = sample_info.side_data_count;
++        if (count) webos_side_data[i][0] = *side_data;
++        auto& entry = webos_side_data[i][count++];
++        entry.type = kWebosStarfishAudioTiming;
++        entry.data = webos_timing[i].data();
++        entry.size = webos_timing[i].size();
++        sample_info.side_data = webos_side_data[i].data();
++        sample_info.side_data_count = count;
++      }
++#endif
+     } else {
+       DCHECK(sample_type == kSbMediaTypeVideo);
+       sample_info.video_sample_info = video_sample_info_;
