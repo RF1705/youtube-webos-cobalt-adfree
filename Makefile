@@ -81,20 +81,6 @@ NODE_DOCKER_IMAGE?=node:22
 
 WEBOS_YOUTUBE_APP_FILES?=adblockMain.js adblockMain.css
 
-STANDALONE_APP_ID?=com.cobalt.youtube.launcher
-STANDALONE_DISPLAY_NAME?=YouTube Cobalt
-STANDALONE_VERSION?=$(PROJECT_VERSION)
-STANDALONE_COBALT_VERSION?=7.1.2-arm-softfp-sb18
-STANDALONE_COBALT_DIR?=cobalt-bin/$(STANDALONE_COBALT_VERSION)
-STANDALONE_YOUTUBE_URL?=https://www.youtube.com/tv?launch=menu
-STANDALONE_WORKDIR?=$(WORKDIR)/standalone
-STANDALONE_OUTPUT_DIR?=$(PACKAGE_OUTPUT_DIR)
-STANDALONE_PACKAGE?=$(STANDALONE_OUTPUT_DIR)/$(STANDALONE_APP_ID)_$(STANDALONE_VERSION)_arm.ipk
-STANDALONE_POC_COBALT_VERSION?=23.lts.6-12
-STANDALONE_POC_RUNTIME_SOURCE?=cobalt-bin/$(STANDALONE_POC_COBALT_VERSION)
-STANDALONE_POC_COBALT_DIR?=$(WORKDIR)/standalone-poc-cobalt/$(STANDALONE_POC_COBALT_VERSION)
-STANDALONE_POC_STARTER_SOURCE?=workdir/ipk/cobalt
-
 
 .PHONY: all
 all: images
@@ -108,17 +94,10 @@ help:
 	@echo "To patch your ipk, use:"
 	@echo "  make package PACKAGE=./my-tv-youtube-application.ipk"
 	@echo ""
-	@echo "To build the standalone Cobalt launcher, use:"
-	@echo "  make standalone-package"
-	@echo "To build the proof-of-concept app with the extracted webOS starter, use:"
-	@echo "  make standalone-poc-package"
 	@echo "To build the k7lp/PJTR package with a private stock starter, use:"
 	@echo "  make images pjtr-package"
 	@echo "To clone or update the private build images, use:"
 	@echo "  make images"
-	@echo "To check the standalone runtime files, use:"
-	@echo "  make standalone-runtime-status"
-	@echo ""
 	@echo "By default it creates a separate app:"
 	@echo "  id:   $(PACKAGE_NAME_TARGET)"
 	@echo "  name: $(PACKAGE_DISPLAY_NAME)"
@@ -197,146 +176,6 @@ images:
 clean-ipk:
 	rm -fr $(WORKDIR)/cobalt $(WORKDIR)/unpacked_ipk $(WORKDIR)/package $(WORKDIR)/image $(WORKDIR)/ipk $(WORKDIR)/ipk-output
 
-.PHONY: clean-standalone
-clean-standalone:
-	rm -fr $(STANDALONE_WORKDIR) $(WORKDIR)/standalone-output
-
-.PHONY: standalone-package
-standalone-package:
-	$(MAKE) clean-standalone
-	$(MAKE) $(STANDALONE_PACKAGE)
-
-.PHONY: standalone-poc-starter
-standalone-poc-starter:
-	@test -f "$(STANDALONE_POC_STARTER_SOURCE)" || (echo "" && echo "--" && echo "Missing POC starter source: $(STANDALONE_POC_STARTER_SOURCE)" && echo "Build or unpack the compatibility source package first." && exit 1)
-	@test -d "$(STANDALONE_POC_RUNTIME_SOURCE)" || (echo "" && echo "--" && echo "Missing POC runtime source: $(STANDALONE_POC_RUNTIME_SOURCE)" && exit 1)
-	rm -rf "$(STANDALONE_POC_COBALT_DIR)"
-	mkdir -p "$(dir $(STANDALONE_POC_COBALT_DIR))"
-	cp -R "$(STANDALONE_POC_RUNTIME_SOURCE)" "$(STANDALONE_POC_COBALT_DIR)"
-	cp "$(STANDALONE_POC_STARTER_SOURCE)" "$(STANDALONE_POC_COBALT_DIR)/cobalt"
-	chmod +x "$(STANDALONE_POC_COBALT_DIR)/cobalt"
-	@echo "POC runtime prepared in:"
-	@echo "  $(STANDALONE_POC_COBALT_DIR)"
-	@echo ""
-	@echo "This is only for the compatibility proof of concept."
-
-.PHONY: standalone-poc-runtime-status
-standalone-poc-runtime-status: standalone-poc-starter
-	$(MAKE) standalone-runtime-status STANDALONE_COBALT_DIR="$(STANDALONE_POC_COBALT_DIR)"
-
-.PHONY: standalone-poc-package
-standalone-poc-package: standalone-poc-starter
-	$(MAKE) standalone-package STANDALONE_COBALT_DIR="$(STANDALONE_POC_COBALT_DIR)"
-
-.PHONY: standalone-runtime-status
-standalone-runtime-status:
-	@echo "Standalone runtime directory:"
-	@echo "  $(STANDALONE_COBALT_DIR)"
-	@echo ""
-	@if [ -f "$(STANDALONE_COBALT_DIR)/cobalt" ]; then \
-		echo "OK  cobalt executable"; \
-	else \
-		echo "MISS cobalt executable: $(STANDALONE_COBALT_DIR)/cobalt"; \
-	fi
-	@if [ -f "$(STANDALONE_COBALT_DIR)/lib/libcobalt.lz4" ]; then \
-		echo "OK  compressed Cobalt library: lib/libcobalt.lz4"; \
-	elif [ -f "$(STANDALONE_COBALT_DIR)/lib/libcobalt.so" ]; then \
-		echo "OK  Cobalt library: lib/libcobalt.so"; \
-	elif [ -f "$(STANDALONE_COBALT_DIR)/libcobalt.so" ]; then \
-		echo "OK  Cobalt library: libcobalt.so"; \
-	else \
-		echo "MISS Cobalt library"; \
-	fi
-	@if [ -d "$(STANDALONE_COBALT_DIR)/content" ]; then \
-		echo "OK  content directory"; \
-	else \
-		echo "MISS content directory: $(STANDALONE_COBALT_DIR)/content"; \
-	fi
-	@echo ""
-	@echo "When all entries are OK, run:"
-	@echo "  make standalone-package"
-
-$(STANDALONE_WORKDIR):
-	@test -f "$(STANDALONE_COBALT_DIR)/cobalt" || (echo "" && echo "--" && echo "Standalone packaging needs a Cobalt executable at $(STANDALONE_COBALT_DIR)/cobalt." && echo "The old patch archives usually only include libcobalt.so, because they reused the official YouTube starter." && echo "Build or place a free Cobalt runtime there before running this target." && exit 1)
-	@test -f "$(STANDALONE_COBALT_DIR)/libcobalt.so" || test -f "$(STANDALONE_COBALT_DIR)/lib/libcobalt.so" || test -f "$(STANDALONE_COBALT_DIR)/lib/libcobalt.lz4" || (echo "" && echo "--" && echo "Missing libcobalt runtime in $(STANDALONE_COBALT_DIR)" && exit 1)
-	mkdir -p $@/content/app/cobalt/lib $@/content/app/cobalt/content/web/youtube $@/content/web/youtube
-	cp "$(STANDALONE_COBALT_DIR)/cobalt" $@/cobalt
-	if [ -f "$(STANDALONE_COBALT_DIR)/lib/libcobalt.lz4" ]; then \
-		cp "$(STANDALONE_COBALT_DIR)/lib/libcobalt.lz4" $@/content/app/cobalt/lib/libcobalt.lz4; \
-	elif [ -f "$(STANDALONE_COBALT_DIR)/lib/libcobalt.so" ]; then \
-		cp "$(STANDALONE_COBALT_DIR)/lib/libcobalt.so" $@/content/app/cobalt/lib/libcobalt.so; \
-	else \
-		cp "$(STANDALONE_COBALT_DIR)/libcobalt.so" $@/content/app/cobalt/lib/libcobalt.so; \
-	fi
-	cp -r "$(STANDALONE_COBALT_DIR)/content/." $@/content/app/cobalt/content/
-	cp standalone/splash.html $@/content/app/cobalt/content/web/youtube/splash.html
-	cp standalone/splash.html $@/content/web/youtube/splash.html
-	cp assets/icon.png $@/icon.png
-	cp assets/mediumLargeIcon.png $@/mediumLargeIcon.png
-	cp assets/largeIcon.png $@/largeIcon.png
-	cp assets/extraLargeIcon.png $@/extraLargeIcon.png
-	cp assets/bgImage.png $@/bgImage.png
-	cp assets/splashBackground.png $@/splashBackground.png
-	cp assets/imageForRecents.png $@/imageForRecents.png
-	cp assets/playIcon.png $@/playIcon.png
-	printf '%s\n' \
-	  '{"id":"$(STANDALONE_APP_ID)",' \
-	  '"version":"$(STANDALONE_VERSION)",' \
-	  '"vendor":"RF1705",' \
-	  '"type":"native",' \
-	  '"main":"cobalt",' \
-	  '"title":"$(STANDALONE_DISPLAY_NAME)",' \
-	  '"icon":"icon.png",' \
-	  '"largeIcon":"largeIcon.png",' \
-	  '"mediumLargeIcon":"mediumLargeIcon.png",' \
-	  '"extraLargeIcon":"extraLargeIcon.png",' \
-	  '"bgImage":"bgImage.png",' \
-	  '"splashBackground":"splashBackground.png",' \
-	  '"imageForRecents":"imageForRecents.png",' \
-	  '"playIcon":"playIcon.png",' \
-	  '"iconColor":"#ff0000",' \
-	  '"resolution":"1920x1080",' \
-	  '"vendorExtension":{"userAgent":"$$browserName$$/$$browserVersion$$ ($$platformName$$-$$platformVersion$$), _TV_O18/$$firmwareVersion$$ (LG, $$modelName$$, $$networkMode$$)","allowCrossDomain":true},' \
-	  '"support360Content":true,' \
-	  '"trustLevel":"netcast",' \
-	  '"privilegedJail":true,' \
-	  '"supportGIP":true,' \
-	  '"uiRevision":2,' \
-	  '"nativeLifeCycleInterfaceVersion":2,' \
-	  '"supportQuickStart":true,' \
-	  '"enablePigScreenSaver":false}' > $@/appinfo.json
-	printf '%s\n' \
-	  '--webos_extra_web_file_dir=/usr/share/javascript/' \
-	  '--url=$(STANDALONE_YOUTUBE_URL)' \
-	  '--retain_remote_typeface_cache_during_suspend' \
-	  '--fallback_splash_screen_url=file:///youtube/splash.html' \
-	  '--min_log_level=info' \
-	  '--enable_pseudo_touch' \
-	  '--loader_use_mmap_file' > $@/switches
-	if [ -f "$(STANDALONE_COBALT_DIR)/lib/libcobalt.lz4" ]; then \
-		printf '%s\n' '--loader_use_compression' >> $@/switches; \
-	fi
-	printf '%s\n' \
-	  '{"manifest_version":2,"name":"Cobalt","description":"Standalone Cobalt YouTube launcher","version":"$(STANDALONE_VERSION)"}' > $@/content/app/cobalt/manifest.json
-
-$(STANDALONE_PACKAGE): FORCE $(STANDALONE_WORKDIR)
-	@aresCmd=$$(command -v ares-package); \
-	if [ "$$aresCmd" == "" ]; then \
-		npmCmd=$$(command -v npm); \
-		if [ "$$npmCmd" == "" ]; then \
-			echo "\"npm\" is required to install the webOS CLI"; \
-			exit 1; \
-		fi; \
-		npm install --save-dev @webos-tools/cli; \
-		aresCmd=node_modules/.bin/ares-package; \
-	fi; \
-	mkdir -p $(STANDALONE_OUTPUT_DIR) $(WORKDIR)/standalone-output; \
-	$$aresCmd -v --outdir $(WORKDIR)/standalone-output $(STANDALONE_WORKDIR)
-	mv $(WORKDIR)/standalone-output/$(STANDALONE_APP_ID)_$(STANDALONE_VERSION)_arm.ipk $@
-	python3 $(IPK_OWNERSHIP_NORMALIZER) $@
-	python3 $(IPK_CONTAINER_VERIFIER) $@
-	@echo "Standalone package can be installed with:"
-	@echo "  ares-install $(STANDALONE_PACKAGE)"
 
 .PRECIOUS: $(WORKDIR)/image/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt
 $(WORKDIR)/image/usr/palm/applications/$(PACKAGE_NAME_OFFICIAL)/cobalt:
