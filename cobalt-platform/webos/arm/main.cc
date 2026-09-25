@@ -36,7 +36,8 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
     dup2(log_pipe[1], STDERR_FILENO);
     close(log_pipe[1]);
 
-    std::thread([read_fd = log_pipe[0], log_path, kMaxLogBytes,\n                 kRetainedLogBytes]() {
+    std::thread([read_fd = log_pipe[0], log_path, kMaxLogBytes,
+      kRetainedLogBytes]() {
       FILE* log = std::fopen(log_path, "a+b");
 
       auto trim_log = [&]() {
