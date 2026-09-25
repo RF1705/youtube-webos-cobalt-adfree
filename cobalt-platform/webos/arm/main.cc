@@ -1,5 +1,6 @@
 #include <time.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -22,10 +23,11 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
   // raw ALSA device.
   setenv("PULSE_SERVER", "unix:/var/run/pulse/native", 1);
 
-  // Keep Cobalt diagnostics bounded. /tmp is a memory-backed filesystem on
-  // webOS, so an unbounded append-only log can otherwise consume the complete
-  // tmpfs during a long-running session.
+  // Keep the most recent Cobalt diagnostics in a bounded circular log.
+  // /tmp is memory-backed on webOS, so the file must never be allowed to grow
+  // without limit. The file contains a small header followed by a 16 MiB ring.
   constexpr size_t kMaxLogBytes = 16 * 1024 * 1024;
+  constexpr size_t kLogHeaderBytes = 64;
   const char* log_path = "/tmp/cobalt-starterless.log";
   int log_pipe[2] = {-1, -1};
   if (pipe(log_pipe) == 0) {
@@ -34,40 +36,49 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
     close(log_pipe[1]);
 
     std::thread([read_fd = log_pipe[0], log_path]() {
-      FILE* log = std::fopen(log_path, "a");
-      size_t written = 0;
+      FILE* log = std::fopen(log_path, "w+b");
+      size_t write_offset = 0;
+
+      auto write_header = [&]() {
+        if (!log) return;
+        char header[kLogHeaderBytes] = {};
+        std::snprintf(header, sizeof(header),
+                      "COBALT-RING-V1 offset=%010zu size=%010zu\n",
+                      write_offset, kMaxLogBytes);
+        std::fseek(log, 0, SEEK_SET);
+        std::fwrite(header, 1, sizeof(header), log);
+      };
+
       if (log) {
-        if (std::fseek(log, 0, SEEK_END) == 0) {
-          const long current_size = std::ftell(log);
-          if (current_size > 0) {
-            written = static_cast<size_t>(current_size);
-          }
-        }
-        if (written >= kMaxLogBytes) {
-          std::fclose(log);
-          log = std::fopen(log_path, "w");
-          written = 0;
-        }
+        write_header();
       }
 
       char buffer[16 * 1024];
       ssize_t count = 0;
       while ((count = read(read_fd, buffer, sizeof(buffer))) > 0) {
         if (!log) {
-          log = std::fopen(log_path, "a");
+          log = std::fopen(log_path, "w+b");
+          write_offset = 0;
           if (!log) continue;
+          write_header();
         }
 
-        if (written + static_cast<size_t>(count) > kMaxLogBytes) {
-          std::fclose(log);
-          log = std::fopen(log_path, "w");
-          written = 0;
-          if (!log) continue;
+        size_t consumed = 0;
+        const size_t bytes_to_write = static_cast<size_t>(count);
+        while (consumed < bytes_to_write) {
+          const size_t remaining = kMaxLogBytes - write_offset;
+          const size_t chunk =
+              std::min(bytes_to_write - consumed, remaining);
+
+          std::fseek(log,
+                     static_cast<long>(kLogHeaderBytes + write_offset),
+                     SEEK_SET);
+          std::fwrite(buffer + consumed, 1, chunk, log);
+          consumed += chunk;
+          write_offset = (write_offset + chunk) % kMaxLogBytes;
         }
 
-        const size_t bytes =
-            std::fwrite(buffer, 1, static_cast<size_t>(count), log);
-        written += bytes;
+        write_header();
         std::fflush(log);
       }
 
