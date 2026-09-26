@@ -7,7 +7,7 @@
 #include <thread>
 #include <vector>
 
-#include <unistd.h>
+#include <fcntl.h>\n#include <sys/stat.h>\n#include <unistd.h>
 
 #include "starboard/configuration.h"
 #include "starboard/shared/signal/crash_signals.h"
