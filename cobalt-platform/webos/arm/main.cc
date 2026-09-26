@@ -26,72 +26,88 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
   // Keep Cobalt diagnostics bounded. /tmp is memory-backed on webOS, so an
   // unbounded append-only log can otherwise consume the complete tmpfs during
   // a long-running session. Once the log reaches 16 MiB, retain the newest
-  // 8 MiB and continue appending so the file always stays chronological.
-  constexpr size_t kMaxLogBytes = 16 * 1024 * 1024;
-  constexpr size_t kRetainedLogBytes = 8 * 1024 * 1024;
+  // 8 MiB and continue appending.
+  constexpr off_t kMaxLogBytes = 16 * 1024 * 1024;
+  constexpr off_t kRetainedLogBytes = 8 * 1024 * 1024;
   const char* log_path = "/tmp/cobalt-starterless.log";
-  int log_pipe[2] = {-1, -1};
-  if (pipe(log_pipe) == 0) {
-    dup2(log_pipe[1], STDOUT_FILENO);
-    dup2(log_pipe[1], STDERR_FILENO);
-    close(log_pipe[1]);
 
-    std::thread([read_fd = log_pipe[0], log_path, kMaxLogBytes,
-      kRetainedLogBytes]() {
-      FILE* log = std::fopen(log_path, "a+b");
+  auto trim_log = [log_path](off_t size) {
+    if (size < kMaxLogBytes) return;
 
-      auto trim_log = [&]() {
-        if (!log) return;
+    const off_t source_start = size - kRetainedLogBytes;
+    int fd = open(log_path, O_RDWR);
+    if (fd < 0) return;
 
-        if (std::fseek(log, 0, SEEK_END) != 0) return;
-        const long size = std::ftell(log);
-        if (size < 0 || static_cast<size_t>(size) < kMaxLogBytes) return;
+    char buffer[64 * 1024];
+    off_t copied = 0;
+    while (copied < kRetainedLogBytes) {
+      const size_t chunk = static_cast<size_t>(
+          std::min<off_t>(sizeof(buffer), kRetainedLogBytes - copied));
+      const ssize_t bytes_read =
+          pread(fd, buffer, chunk, source_start + copied);
+      if (bytes_read <= 0) break;
 
-        const long keep =
-            static_cast<long>(std::min(kRetainedLogBytes,
-                                       static_cast<size_t>(size)));
-        std::vector<char> tail(static_cast<size_t>(keep));
-        if (std::fseek(log, size - keep, SEEK_SET) != 0) return;
-
-        const size_t bytes_read =
-            std::fread(tail.data(), 1, tail.size(), log);
-        std::fclose(log);
-        log = std::fopen(log_path, "wb");
-        if (!log) return;
-
-        std::fwrite(tail.data(), 1, bytes_read, log);
-        std::fflush(log);
-      };
-
-      trim_log();
-
-      char buffer[16 * 1024];
-      ssize_t count = 0;
-      while ((count = read(read_fd, buffer, sizeof(buffer))) > 0) {
-        if (!log) {
-          log = std::fopen(log_path, "a+b");
-          if (!log) continue;
+      ssize_t written = 0;
+      while (written < bytes_read) {
+        const ssize_t result =
+            pwrite(fd, buffer + written,
+                   static_cast<size_t>(bytes_read - written),
+                   copied + written);
+        if (result <= 0) {
+          close(fd);
+          return;
         }
+        written += result;
+      }
+      copied += bytes_read;
+    }
 
-        if (std::fseek(log, 0, SEEK_END) == 0) {
-          const long size = std::ftell(log);
-          if (size >= 0 &&
-              static_cast<size_t>(size) + static_cast<size_t>(count) >
-                  kMaxLogBytes) {
-            trim_log();
-          }
-        }
+    if (copied == kRetainedLogBytes) {
+      ftruncate(fd, kRetainedLogBytes);
+    }
+    close(fd);
+  };
 
-        if (!log) continue;
-        std::fseek(log, 0, SEEK_END);
-        std::fwrite(buffer, 1, static_cast<size_t>(count), log);
-        std::fflush(log);
+  struct stat log_stat;
+  if (stat(log_path, &log_stat) == 0) {
+    trim_log(log_stat.st_size);
+  }
+
+  FILE* stdout_log = std::freopen(log_path, "a", stdout);
+  FILE* stderr_log = std::freopen(log_path, "a", stderr);
+  if (stdout_log) {
+    std::setvbuf(stdout_log, nullptr, _IOLBF, 0);
+  }
+  if (stderr_log) {
+    // Cobalt 23 logs unsupported modern YouTube selectors in large bursts.
+    // Buffer those diagnostics so thousands of small writes cannot starve the
+    // real-time PulseAudio thread during playback startup.
+    std::setvbuf(stderr_log, nullptr, _IOFBF, 256 * 1024);
+  }
+
+  std::thread([log_path, trim_log]() {
+    while (true) {
+      sleep(1);
+      struct stat current_stat;
+      if (stat(log_path, &current_stat) != 0 ||
+          current_stat.st_size < kMaxLogBytes) {
+        continue;
       }
 
-      if (log) std::fclose(log);
-      close(read_fd);
-    }).detach();
-  }
+      flockfile(stdout);
+      flockfile(stderr);
+      std::fflush(stdout);
+      std::fflush(stderr);
+
+      if (stat(log_path, &current_stat) == 0) {
+        trim_log(current_stat.st_size);
+      }
+
+      funlockfile(stderr);
+      funlockfile(stdout);
+    }
+  }).detach();
+
   std::fprintf(stderr, "\n=== Cobalt starterless process started ===\n");
 
   tzset();
