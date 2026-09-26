@@ -31,7 +31,7 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
   constexpr off_t kRetainedLogBytes = 8 * 1024 * 1024;
   const char* log_path = "/tmp/cobalt-starterless.log";
 
-  auto trim_log = [log_path](off_t size) {
+  auto trim_log = [log_path, kMaxLogBytes, kRetainedLogBytes](off_t size) {
     if (size < kMaxLogBytes) return;
 
     const off_t source_start = size - kRetainedLogBytes;
@@ -85,7 +85,7 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
     std::setvbuf(stderr_log, nullptr, _IOFBF, 256 * 1024);
   }
 
-  std::thread([log_path, trim_log]() {
+  std::thread([log_path, trim_log, kMaxLogBytes]() {
     while (true) {
       sleep(1);
       struct stat current_stat;
