@@ -29,12 +29,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: cobalt-main-${{ inputs.cobalt_ref }}-${{ inputs.build_type }}
+  group: cobalt-${{ github.ref_name }}-${{ inputs.cobalt_ref }}-${{ inputs.build_type }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Cobalt ${{ inputs.cobalt_ref }} from main
+    name: Cobalt ${{ inputs.cobalt_ref }} from ${{ github.ref_name }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -47,10 +47,10 @@ jobs:
       COBALT_BUILD_LOG: ${{ github.workspace }}/output/cobalt-${{ inputs.build_type }}.log
 
     steps:
-      - name: Check out main
+      - name: Check out requested ref
         uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.ref }}
           fetch-depth: 1
 
       - name: Validate source
@@ -207,7 +207,7 @@ jobs:
           archive_path="$GITHUB_WORKSPACE/output/$archive"
           tar -C "$build_dir" -cJf "$archive_path" cobalt content
           sha256sum "$archive_path" > "$archive_path.sha256"
-          printf '%s\n' "repository=$GITHUB_REPOSITORY" "source_ref=main" "source_sha=$SOURCE_SHA" "cobalt_ref=$COBALT_REF" "starboard_api=13" "build_type=$BUILD_TYPE" "archive=$archive" > "$GITHUB_WORKSPACE/output/cobalt-build.txt"
+          printf '%s\n' "repository=$GITHUB_REPOSITORY" "source_ref=$GITHUB_REF_NAME" "source_sha=$SOURCE_SHA" "cobalt_ref=$COBALT_REF" "starboard_api=13" "build_type=$BUILD_TYPE" "archive=$archive" > "$GITHUB_WORKSPACE/output/cobalt-build.txt"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Upload Cobalt runtime
