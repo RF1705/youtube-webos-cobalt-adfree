@@ -44,6 +44,10 @@ mkdir -p "$platform_target"
 # and force Ninja to rebuild almost the entire dependency graph.
 rsync -ac "$overlay/" "$platform_target/"
 
+# Linux shared provides SbSystemGetPath for this port. Keep that implementation
+# and only replace its font paths with the paths used by stock LG Cobalt.
+python3 "$repo_root/scripts/patch-webos-system-font-paths.py" "$cobalt_root"
+
 if ! grep -q "'webos-arm': 'starboard/webos/arm'" "$platforms_file"; then
   git -C "$cobalt_root" apply --check "$registration_patch"
   git -C "$cobalt_root" apply "$registration_patch"

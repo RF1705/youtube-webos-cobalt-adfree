@@ -1,0 +1,66 @@
+<!--
+ Located at /content/system_fonts/fonts.xml
+ Indicates font files in /usr/share/fonts/
+-->
+<familyset version="1">
+    <!-- first family is default -->
+    <family>
+        <font weight="300" style="normal">LG_Smart_UI-Light.ttf</font>
+        <font weight="400" style="normal">LG_Smart_UI-Regular.ttf</font>
+        <font weight="600" style="normal">LG_Smart_UI-SemiBold.ttf</font>
+        <font weight="700" style="normal">LG_Smart_UI-Bold.ttf</font>
+    </family>
+    <family><font weight="400" style="normal">LG_Smart_UI_JP.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Amharic.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Bengali.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Devanagari.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Gurmukhi.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Gujarati.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Kannada.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Malayalam.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Oriya.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Telugu.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Tamil.ttf</font></family>
+    <family name="LG Smart UI Urdu"><font weight="400" style="normal">LG_Smart_UI_Urdu.ttf</font></family>
+    <family disable_caching="true">
+        <font weight="400" style="normal">LG_Smart_UI_AR_HE_TH-Regular.ttf</font>
+        <font weight="600" style="normal">LG_Smart_UI_AR_HE_TH-SemiBold.ttf</font>
+    </family>
+    <family name="LG Smart UI SC"><font weight="400" style="normal">LG_Smart_UI_SC.ttf</font></family>
+    <family name="LG Smart UI TC"><font weight="400" style="normal">LG_Smart_UI_TC.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Display-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Smart_UI_Dingbat.ttf</font></family>
+    <family><font weight="400" style="normal">NotoSansKhmer-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">NotoSansSinhala-Regular.ttf</font></family>
+    <family name="serif"><font weight="400" style="normal" font_name="Droid Serif" postscript_name="DroidSerif">DroidSerif-Regular.ttf</font></family>
+    <alias name="fantasy" to="serif" />
+    <family name="monospace"><font weight="400" style="normal" font_name="Droid Sans Mono" postscript_name="DroidSansMono">DroidSansMono.ttf</font></family>
+    <alias name="sans-serif-monospace" to="monospace" />
+    <family name="serif-monospace"><font weight="400" style="normal" font_name="HYCoMo0605" postscript_name="HYCoMo0605">font1_courier.ttf</font></family>
+    <family name="casual"><font weight="400" style="normal" font_name="HYcas0528" postscript_name="HYcas0528">font5_casual.ttf</font></family>
+    <family name="cursive"><font weight="400" style="normal" font_name="HYCur0531" postscript_name="HYCur0531">font6_cursive.ttf</font></family>
+    <family><font weight="400" style="normal">DroidKufi-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">DroidNaskh-Regular.ttf</font></family>
+    <family pages="0,14,17,32,48-51,77-159,172-215,249-250,254-255,260">
+        <font weight="400" style="normal" disable_synthetic_bolding="true">DroidSansFallback.ttf</font>
+    </family>
+    <family><font weight="400" style="normal">NotoSansGeorgian-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">DroidSansGeorgian.ttf</font></family>
+    <family><font weight="400" style="normal">DroidSansArmenian.ttf</font></family>
+    <family><font weight="400" style="normal">DroidSansThai-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">DroidSerifThai-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">Tinos-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">LG_Big5HK_V.ttf</font></family>
+    <family><font weight="400" style="normal">GP3_LG_Display_HK.ttf</font></family>
+    <family><font weight="400" style="normal">Lohit-Bengali.ttf</font></family>
+    <family><font weight="400" style="normal">Lohit-Gujarati.ttf</font></family>
+    <family><font weight="400" style="normal">Lohit-Malayalam.ttf</font></family>
+    <family><font weight="400" style="normal">Lohit-Punjabi.ttf</font></family>
+    <family><font weight="400" style="normal">Lohit-Tamil.ttf</font></family>
+    <family><font weight="400" style="normal">NotoSansLao-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">NotoSansMyanmar-Regular.ttf</font></family>
+    <family><font weight="400" style="normal">AnjaliOldLipi.ttf</font></family>
+    <family><font weight="400" style="normal">NotoColorEmoji.ttf</font></family>
+    <family><font weight="400" style="normal">NotoColorEmojiSubset.ttf</font></family>
+    <family><font weight="400" style="normal">NotoEmoji-Regular.ttf</font></family>
+</familyset>
