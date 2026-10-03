@@ -10,7 +10,9 @@ sb_is_evergreen = false
 sb_is_evergreen_compatible = false
 sb_evergreen_compatible_use_libunwind = false
 
-# Cobalt's limited package retains Latin, international, compact CJK and
-# monochrome emoji fallback while avoiding the two ~19 MB precompressed font
-# files from the standard desktop-oriented package.
-cobalt_font_package = "limited"
+# Match LG's stock Cobalt layout: bundle only the small Roboto base font and
+# symbol fallbacks. Language, CJK and emoji fallbacks come from webOS system
+# fonts configured through content/system_fonts/fonts.xml.
+cobalt_font_package = "empty"
+cobalt_font_package_override_named_sans_serif = 1
+cobalt_font_package_override_fallback_symbols = 1
