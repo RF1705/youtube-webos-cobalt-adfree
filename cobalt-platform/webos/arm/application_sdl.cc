@@ -14,6 +14,7 @@
 #include "starboard/input.h"
 #include "starboard/key.h"
 #include "starboard/shared/starboard/audio_sink/audio_sink_internal.h"
+#include "starboard/webos/arm/sdl_wheel_input.h"
 #include "starboard/webos/arm/window_internal.h"
 
 namespace starboard {
@@ -485,7 +486,7 @@ ApplicationSdl::Event* ApplicationSdl::TranslateEvent(const SDL_Event& event) {
   }
 
   if (event.type == SDL_MOUSEMOTION || event.type == SDL_MOUSEBUTTONDOWN ||
-      event.type == SDL_MOUSEBUTTONUP) {
+      event.type == SDL_MOUSEBUTTONUP || event.type == SDL_MOUSEWHEEL) {
     SbInputData* data = new SbInputData();
     std::memset(data, 0, sizeof(*data));
     data->window = window_;
@@ -500,6 +501,17 @@ ApplicationSdl::Event* ApplicationSdl::TranslateEvent(const SDL_Event& event) {
       data->position.y = event.motion.y;
       data->delta.x = event.motion.xrel;
       data->delta.y = event.motion.yrel;
+    } else if (event.type == SDL_MOUSEWHEEL) {
+      const SdlWheelDelta delta = TranslateSdlWheelDelta(event.wheel);
+      int mouse_x = 0;
+      int mouse_y = 0;
+      SDL_GetMouseState(&mouse_x, &mouse_y);
+      data->type = kSbInputEventTypeWheel;
+      data->position.x = mouse_x;
+      data->position.y = mouse_y;
+      data->delta.x = delta.x;
+      data->delta.y = delta.y;
+      data->key_modifiers = SdlModifiersToSbModifiers(SDL_GetModState());
     } else {
       data->type = event.type == SDL_MOUSEBUTTONDOWN ? kSbInputEventTypePress
                                                      : kSbInputEventTypeUnpress;
