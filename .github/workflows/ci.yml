@@ -21,7 +21,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq git patch sed binutils squashfs-tools rename findutils xz-utils make
+          sudo apt-get install -y jq git patch sed binutils squashfs-tools rename findutils xz-utils make g++ libsdl2-dev
 
       - name: Setup Node.js
         uses: actions/setup-node@v5
@@ -43,7 +43,7 @@ jobs:
 
       - name: Check repository separation
         run: |
-          if git ls-files | grep -E '\.(ipk|xz|tar|tar\.gz|tgz|img|crx)$'; then
+          if git ls-files | grep -E '\\.(ipk|xz|tar|tar\\.gz|tgz|img|crx)$'; then
             echo "Build artifacts must not be tracked in the public repository."
             exit 1
           fi
@@ -51,6 +51,14 @@ jobs:
           python3 scripts/normalize-ipk-ownership.py --help
           python3 scripts/verify-ipk-container.py --help
           python3 scripts/test-ipk-tools.py
+
+      - name: Run SDL wheel input regression test
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -I cobalt-platform/webos/arm \
+            scripts/test-sdl-wheel-input.cc \
+            -o /tmp/test-sdl-wheel-input
+          /tmp/test-sdl-wheel-input
 
       - name: Build injected web app
         working-directory: webapp
