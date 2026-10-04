@@ -82,10 +82,10 @@ jobs:
           echo "cobalt_ref=$cobalt_ref" >> "$GITHUB_OUTPUT"
           echo "build_type=$build_type" >> "$GITHUB_OUTPUT"
 
-      - name: Check out main
+      - name: Check out requested ref
         uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.ref }}
           fetch-depth: 1
 
       - name: Resolve package version
@@ -127,6 +127,7 @@ jobs:
           test -f scripts/normalize-ipk-ownership.py
           test -f scripts/verify-ipk-container.py
           test -f starterless-cobalt/appinfo.json
+          test -s cobalt-platform/webos/system_fonts/fonts.xml
           test -f assets/icon.png
           test -f assets/largeIcon.png
           test "$(jq -r '.version' starterless-cobalt/appinfo.json)" = "${{ steps.version.outputs.version }}"
@@ -221,7 +222,7 @@ jobs:
           cobalt_source_sha=${{ steps.cobalt.outputs.source_sha }}
           cobalt_ref=${{ steps.cobalt.outputs.cobalt_ref }}
           cobalt_build_type=${{ steps.cobalt.outputs.build_type }}
-          package_ref=main
+          package_ref=$GITHUB_REF_NAME
           package_sha=$(git rev-parse HEAD)
           package_version=${{ steps.version.outputs.version }}
           package_version_source=${{ steps.version.outputs.source }}

@@ -58,6 +58,16 @@ cp "$repo_root/starterless-cobalt/appinfo.json" "$package_root/appinfo.json"
 cp "$build_dir/cobalt" "$package_root/cobalt"
 cp -R "$build_dir/content" "$package_root/content"
 
+# Cobalt's bundled package contains only the stock-style Roboto/symbol subset.
+# Language, CJK and emoji fallback metadata points at webOS /usr/share/fonts.
+system_fonts_source="$repo_root/cobalt-platform/webos/system_fonts/fonts.xml"
+if [[ ! -s "$system_fonts_source" ]]; then
+  echo "Missing webOS system font configuration: $system_fonts_source" >&2
+  exit 5
+fi
+mkdir -p "$package_root/content/system_fonts"
+cp -p "$system_fonts_source" "$package_root/content/system_fonts/fonts.xml"
+
 # Always overlay the selected web assets at packaging time. For artifact-based
 # packaging WEBAPP_OUTPUT_DIR may point at the runtime artifact itself, which
 # keeps the IPK byte-for-byte aligned with the tested Cobalt content bundle.
@@ -91,6 +101,9 @@ cp "$repo_root/assets/largeIcon.png" "$package_root/largeIcon.png"
 chmod +x "$package_root/cobalt"
 
 # Final guard on the exact package tree, not only the source/output directories.
+# Missing system font metadata makes Cobalt abort during Skia initialization.
+test -s "$package_root/content/system_fonts/fonts.xml"
+cmp -s "$system_fonts_source" "$package_root/content/system_fonts/fonts.xml"
 test -s "$adblock_target/adblockPreload.js"
 grep -Fq '__shorts' "$adblock_target/adblockMain.js"
 grep -Fq '__ytafPreloadExecuted' "$adblock_target/adblockPreload.js"
