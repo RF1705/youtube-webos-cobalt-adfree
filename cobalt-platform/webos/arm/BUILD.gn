@@ -6,6 +6,7 @@ static_library("starboard_platform") {
     "application_sdl.h",
     "main.cc",
     "player_set_bounds.cc",
+    "sdl_wheel_input.h",
     "shared_av_experiment.h",
     "starfish_av_components.cc",
     "starfish_av_components.h",
