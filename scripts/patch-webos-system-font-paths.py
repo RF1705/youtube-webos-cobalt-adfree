@@ -12,16 +12,18 @@ source = Path(sys.argv[1]) / "starboard/linux/shared/system_get_path.cc"
 text = source.read_text()
 
 font_dir = """    case kSbSystemPathFontDirectory:
-      if (SbStringCopy(path, "/usr/share/fonts", kPathSize) >= kPathSize) {
+      if (starboard::strlcpy(path.data(), "/usr/share/fonts", kPathSize) >=
+          kPathSize) {
         return false;
       }
       break;"""
 
 font_config = """    case kSbSystemPathFontConfigurationDirectory:
-      if (!SbSystemGetPath(kSbSystemPathContentDirectory, path, kPathSize)) {
+      if (!GetContentDirectory(path.data(), kPathSize)) {
         return false;
       }
-      if (SbStringConcat(path, "/system_fonts", kPathSize) >= kPathSize) {
+      if (starboard::strlcat(path.data(), "/system_fonts", kPathSize) >=
+          kPathSize) {
         return false;
       }
       break;"""
@@ -36,9 +38,13 @@ def replace_case(contents: str, case_name: str, replacement: str) -> str:
         raise SystemExit(f"Could not uniquely patch {case_name} in {source}")
     return updated
 
-text = replace_case(text, "kSbSystemPathFontDirectory", font_dir)
+# In upstream Cobalt 23.lts.6 both font path IDs share one case body. Patch the
+# configuration case first; this consumes the shared implementation and leaves
+# the font-directory case available for the second replacement.
 text = replace_case(
     text, "kSbSystemPathFontConfigurationDirectory", font_config
 )
+text = replace_case(text, "kSbSystemPathFontDirectory", font_dir)
+
 source.write_text(text)
 print(f"Configured webOS system font paths in: {source}")
