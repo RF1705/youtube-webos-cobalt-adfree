@@ -82,10 +82,10 @@ jobs:
           echo "cobalt_ref=$cobalt_ref" >> "$GITHUB_OUTPUT"
           echo "build_type=$build_type" >> "$GITHUB_OUTPUT"
 
-      - name: Check out runtime source
+      - name: Check out requested ref
         uses: actions/checkout@v5
         with:
-          ref: ${{ steps.cobalt.outputs.source_sha }}
+          ref: ${{ github.ref }}
           fetch-depth: 1
 
       - name: Resolve package version
@@ -222,7 +222,7 @@ jobs:
           cobalt_source_sha=${{ steps.cobalt.outputs.source_sha }}
           cobalt_ref=${{ steps.cobalt.outputs.cobalt_ref }}
           cobalt_build_type=${{ steps.cobalt.outputs.build_type }}
-          package_ref=${{ steps.cobalt.outputs.source_ref }}
+          package_ref=$GITHUB_REF_NAME
           package_sha=$(git rev-parse HEAD)
           package_version=${{ steps.version.outputs.version }}
           package_version_source=${{ steps.version.outputs.source }}
