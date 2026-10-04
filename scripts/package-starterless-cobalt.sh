@@ -101,6 +101,9 @@ cp "$repo_root/assets/largeIcon.png" "$package_root/largeIcon.png"
 chmod +x "$package_root/cobalt"
 
 # Final guard on the exact package tree, not only the source/output directories.
+# Missing system font metadata makes Cobalt abort during Skia initialization.
+test -s "$package_root/content/system_fonts/fonts.xml"
+cmp -s "$system_fonts_source" "$package_root/content/system_fonts/fonts.xml"
 test -s "$adblock_target/adblockPreload.js"
 grep -Fq '__shorts' "$adblock_target/adblockMain.js"
 grep -Fq '__ytafPreloadExecuted' "$adblock_target/adblockPreload.js"
