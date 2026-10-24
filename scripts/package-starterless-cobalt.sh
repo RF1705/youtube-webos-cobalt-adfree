@@ -109,6 +109,9 @@ fi
 mkdir -p "$package_root/lib"
 cp "$runtime_dir/libstdc++.so.6" "$package_root/lib/libstdc++.so.6"
 cp "$runtime_dir/libgcc_s.so.1" "$package_root/lib/libgcc_s.so.1"
+if [[ -f "$runtime_dir/libatomic.so.1" ]]; then
+  cp "$runtime_dir/libatomic.so.1" "$package_root/lib/libatomic.so.1"
+fi
 if [[ "$bundled_aac" == 1 ]]; then
   cp "$build_dir/lib/libfdk-aac.so" "$package_root/lib/libfdk-aac.so"
   cp "$build_dir/lib/fdk-aac-build.txt" "$package_root/lib/fdk-aac-build.txt"

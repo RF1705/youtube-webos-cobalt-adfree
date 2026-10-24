@@ -279,17 +279,20 @@ void StarfishVideoDecoder::InitializePipeline(
     app_id = "youtube.leanback.v4";
   }
   const std::string& window_id = ApplicationSdl::Get()->GetExportedWindowId();
-  if (window_id.empty()) {
+  if (window_id.empty() && !ApplicationSdl::Get()->UsesAcbVideo()) {
     ReportError("SDL did not create a webOS exported video window.");
     return;
   }
+  const std::string window_field =
+      window_id.empty() ? std::string()
+                        : "\"windowId\":\"" + window_id + "\",";
 
   const int64_t target_pts_ns = seek_to_time_.load() * 1000;
   const AdaptiveVideoCapabilities capabilities =
       GetAdaptiveVideoCapabilities(codec_, sample_info);
   std::string payload = FormatString(
       "{\"args\":[{\"mediaTransportType\":\"BUFFERSTREAM\","
-      "\"option\":{\"windowId\":\"%s\",\"appId\":\"%s\","
+      "\"option\":{%s\"appId\":\"%s\","
       "\"queryPosition\":false,"
       "\"externalStreamingInfo\":{\"contents\":{\"codec\":{"
       "\"video\":\"%s\"},\"esInfo\":{\"pauseAtDecodeTime\":true,"
@@ -309,7 +312,7 @@ void StarfishVideoDecoder::InitializePipeline(
       "\"adaptiveResolution\":true,\"maxWidth\":%d,"
       "\"maxHeight\":%d,\"maxFrameRate\":%d},"
       "\"forcedPrerollOnPause\":true,\"seekMode\":\"keep-rate\"}}]}",
-      window_id.c_str(), app_id, codec_name, target_pts_ns, width, height,
+      window_field.c_str(), app_id, codec_name, target_pts_ns, width, height,
       capabilities.width, capabilities.height, capabilities.frame_rate);
 
   SB_LOG(INFO) << "Loading Starfish hardware decoder for " << codec_name
@@ -318,6 +321,7 @@ void StarfishVideoDecoder::InitializePipeline(
                << capabilities.height << "@" << capabilities.frame_rate
                << " using window " << window_id;
   media_api_->notifyForeground();
+  ApplicationSdl::Get()->SetStarfishMediaId(media_api_->getMediaID());
   if (!media_api_->Load(payload.c_str(), &StarfishVideoDecoder::PlayerCallback,
                         this)) {
     ReportError("StarfishMediaAPIs::Load() failed.");
@@ -592,6 +596,9 @@ void StarfishVideoDecoder::HandlePlayerEvent(int type,
                                              const char* str_value) {
   if (shutting_down_.load()) {
     return;
+  }
+  if (type != PF_EVENT_TYPE_FRAMEREADY) {
+    ApplicationSdl::Get()->OnStarfishEvent(type, str_value);
   }
   if (type == PF_EVENT_TYPE_STR_STATE_UPDATE__UNLOADCOMPLETED) {
     SignalUnloadCompleted();

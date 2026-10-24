@@ -180,16 +180,19 @@ jobs:
           sdk_extract="$RUNNER_TEMP/webos-sdk"
           runtime_libs="$GITHUB_WORKSPACE/starterless-cobalt/lib"
           mkdir -p "$sdk_download" "$sdk_extract" "$runtime_libs"
-          rm -f "$runtime_libs/libstdc++.so.6" "$runtime_libs/libgcc_s.so.1"
+          rm -f "$runtime_libs/libstdc++.so.6" "$runtime_libs/libgcc_s.so.1" "$runtime_libs/libatomic.so.1"
           gh release download "$SDK_TAG" --repo openlgtv/buildroot-nc4 --pattern 'arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz' --dir "$sdk_download" --clobber
           tar -xzf "$sdk_download/arm-webos-linux-gnueabi_sdk-buildroot-x86_64.tar.gz" -C "$sdk_extract"
           sysroot="$sdk_extract/arm-webos-linux-gnueabi_sdk-buildroot/arm-webos-linux-gnueabi/sysroot"
           libstdcpp_link="$(find "$sysroot" -name 'libstdc++.so.6' -print -quit)"
           libgcc_link="$(find "$sysroot" -name 'libgcc_s.so.1' -print -quit)"
+          libatomic_link="$(find "$sysroot" -name 'libatomic.so.1' -print -quit)"
           test -e "$libstdcpp_link"
           test -e "$libgcc_link"
+          test -e "$libatomic_link"
           cp -L "$libstdcpp_link" "$runtime_libs/libstdc++.so.6"
           cp -L "$libgcc_link" "$runtime_libs/libgcc_s.so.1"
+          cp -L "$libatomic_link" "$runtime_libs/libatomic.so.1"
 
       - name: Package IPK
         id: package

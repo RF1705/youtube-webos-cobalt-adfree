@@ -2,11 +2,15 @@
 
 #include <SDL2/SDL_syswm.h>
 #include <SDL2/SDL_webOS.h>
+#include <appswitching-control-block/AcbAPI.h>
+#include <dlfcn.h>
+#include <starfish-media-pipeline/StarfishMediaAPIs.h>
 
 #include <EGL/egl.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -113,6 +117,69 @@ unsigned int SdlModifiersToSbModifiers(SDL_Keymod modifiers) {
     result |= kSbKeyModifiersMeta;
   }
   return result;
+}
+
+struct AcbApi {
+  decltype(&AcbAPI_create) create;
+  decltype(&AcbAPI_initialize) initialize;
+  decltype(&AcbAPI_setMediaId) set_media_id;
+  int (*set_media_video_data)(long, const char*, long*);
+  decltype(&AcbAPI_setSinkType) set_sink_type;
+  decltype(&AcbAPI_setState) set_state;
+  decltype(&AcbAPI_setDisplayWindow) set_display_window;
+  decltype(&AcbAPI_finalize) finalize;
+  decltype(&AcbAPI_destroy) destroy;
+};
+
+template <typename T>
+bool LoadSymbol(void* library, const char* name, T* out) {
+  *out = reinterpret_cast<T>(dlsym(library, name));
+  if (!*out) {
+    SB_LOG(ERROR) << "libAcbAPI is missing " << name;
+  }
+  return *out != nullptr;
+}
+
+const AcbApi* GetAcbApi() {
+  static const AcbApi* api = []() -> const AcbApi* {
+    void* library = dlopen("libAcbAPI.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!library) {
+      SB_LOG(ERROR) << "Cannot load libAcbAPI.so.1: " << dlerror();
+      return nullptr;
+    }
+    static AcbApi loaded;
+    if (!LoadSymbol(library, "AcbAPI_create", &loaded.create) ||
+        !LoadSymbol(library, "AcbAPI_initialize", &loaded.initialize) ||
+        !LoadSymbol(library, "AcbAPI_setMediaId", &loaded.set_media_id) ||
+        !LoadSymbol(library, "AcbAPI_setMediaVideoData",
+                    &loaded.set_media_video_data) ||
+        !LoadSymbol(library, "AcbAPI_setSinkType", &loaded.set_sink_type) ||
+        !LoadSymbol(library, "AcbAPI_setState", &loaded.set_state) ||
+        !LoadSymbol(library, "AcbAPI_setDisplayWindow",
+                    &loaded.set_display_window) ||
+        !LoadSymbol(library, "AcbAPI_finalize", &loaded.finalize) ||
+        !LoadSymbol(library, "AcbAPI_destroy", &loaded.destroy)) {
+      return nullptr;
+    }
+    return &loaded;
+  }();
+  return api;
+}
+
+void AcbCallback(long acb_id,
+                 long task_id,
+                 long event_type,
+                 long app_state,
+                 long play_state,
+                 const char* reply) {
+  SB_LOG(INFO) << "ACB event acb=" << acb_id << " task=" << task_id
+               << " event=" << event_type << " app=" << app_state
+               << " play=" << play_state << " reply=" << (reply ? reply : "");
+}
+
+const char* AppId() {
+  const char* app_id = std::getenv("APPID");
+  return app_id && *app_id ? app_id : "youtube.leanback.v4";
 }
 
 }  // namespace
@@ -273,6 +340,10 @@ bool ApplicationSdl::DestroyWindow(SbWindow window) {
     SDL_webOSDestroyExportedWindow(exported_window_id_.c_str());
     exported_window_id_.clear();
   }
+  {
+    ScopedLock lock(exported_geometry_mutex_);
+    DestroyAcbLocked();
+  }
   SDL_EnableScreenSaver();
   exported_video_clients_ = 0;
   video_screen_saver_inhibited_ = false;
@@ -290,17 +361,28 @@ bool ApplicationSdl::AcquireExportedVideoWindow() {
   if (!SbWindowIsValid(window_)) {
     return false;
   }
-  if (!exported_window_id_.empty()) {
+  if (!exported_window_id_.empty() || acb_id_) {
     ++exported_video_clients_;
     return true;
   }
 
-  const char* exported_window = SDL_webOSCreateExportedWindow(
-      SDL_WEBOS_EXPORED_WINDOW_TYPE_VIDEO);
+  const char* exported_window =
+      acb_video_ ? nullptr
+                 : SDL_webOSCreateExportedWindow(
+                       SDL_WEBOS_EXPORED_WINDOW_TYPE_VIDEO);
   if (!exported_window) {
-    SB_LOG(ERROR) << "SDL_webOSCreateExportedWindow failed: "
-                  << SDL_GetError();
-    return false;
+    if (!acb_video_) {
+      SB_LOG(WARNING) << "SDL_webOSCreateExportedWindow failed: "
+                      << SDL_GetError() << "; using the webOS 4 ACB path.";
+      acb_video_ = true;
+    }
+    if (!CreateAcbLocked()) {
+      return false;
+    }
+    exported_video_clients_ = 1;
+    SDL_DisableScreenSaver();
+    video_screen_saver_inhibited_ = true;
+    return true;
   }
   exported_window_id_ = exported_window;
   exported_video_clients_ = 1;
@@ -317,7 +399,16 @@ void ApplicationSdl::ReleaseExportedVideoWindow() {
     return;
   }
   --exported_video_clients_;
-  if (exported_video_clients_ != 0 || exported_window_id_.empty()) {
+  if (exported_video_clients_ != 0) {
+    return;
+  }
+  if (acb_id_) {
+    DestroyAcbLocked();
+    SDL_EnableScreenSaver();
+    video_screen_saver_inhibited_ = false;
+    return;
+  }
+  if (exported_window_id_.empty()) {
     return;
   }
   SDL_webOSDestroyExportedWindow(exported_window_id_.c_str());
@@ -330,9 +421,11 @@ void ApplicationSdl::ReleaseExportedVideoWindow() {
 
 void ApplicationSdl::SetVideoPaused(bool paused) {
   ScopedLock lock(exported_geometry_mutex_);
-  if (!sdl_initialized_ || exported_window_id_.empty()) {
+  if (!sdl_initialized_ || (exported_window_id_.empty() && !acb_id_)) {
     return;
   }
+  acb_paused_ = paused;
+  ApplyAcbPlayStateLocked();
   const bool inhibit_screen_saver = !paused;
   if (video_screen_saver_inhibited_ == inhibit_screen_saver) {
     return;
@@ -362,11 +455,21 @@ void ApplicationSdl::AcceptFrame(SbPlayer,
                                  int y,
                                  int width,
                                  int height) {
-  if (exported_window_id_.empty() || !SbWindowIsValid(window_) || width <= 0 ||
-      height <= 0) {
+  if ((exported_window_id_.empty() && !acb_id_) || !SbWindowIsValid(window_) ||
+      width <= 0 || height <= 0) {
     return;
   }
   ScopedLock lock(exported_geometry_mutex_);
+  if (acb_id_) {
+    const int logical_width = std::min(window_->width, 1920);
+    const int logical_height = std::min(window_->height, 1080);
+    acb_window_ = {x * logical_width / window_->width,
+                   y * logical_height / window_->height,
+                   width * logical_width / window_->width,
+                   height * logical_height / window_->height};
+    ApplyAcbWindowLocked();
+    return;
+  }
   const int video_width = video_width_.load() > 0 ? video_width_.load()
                                                    : window_->width;
   const int video_height = video_height_.load() > 0 ? video_height_.load()
@@ -408,6 +511,110 @@ void ApplicationSdl::AcceptFrame(SbPlayer,
     SB_LOG(ERROR) << "SDL_webOSExportedSetCropRegion failed: "
                   << SDL_GetError();
   }
+}
+
+bool ApplicationSdl::CreateAcbLocked() {
+  const AcbApi* acb = GetAcbApi();
+  if (!acb) {
+    return false;
+  }
+  acb_id_ = acb->create();
+  if (!acb_id_) {
+    SB_LOG(ERROR) << "AcbAPI_create failed.";
+    return false;
+  }
+  if (!acb->initialize(acb_id_, PLAYER_TYPE_MSE, AppId(), &AcbCallback)) {
+    SB_LOG(ERROR) << "AcbAPI_initialize failed.";
+    acb->destroy(acb_id_);
+    acb_id_ = 0;
+    return false;
+  }
+  acb_loaded_ = false;
+  acb_applied_window_ = {0, 0, 0, 0};
+  SB_LOG(INFO) << "Created ACB video client " << acb_id_;
+  return true;
+}
+
+void ApplicationSdl::DestroyAcbLocked() {
+  if (!acb_id_) {
+    return;
+  }
+  const AcbApi* acb = GetAcbApi();
+  long task_id = 0;
+  acb->set_state(acb_id_, APPSTATE_FOREGROUND, PLAYSTATE_UNLOADED, &task_id);
+  acb->finalize(acb_id_);
+  acb->destroy(acb_id_);
+  SB_LOG(INFO) << "Destroyed ACB video client " << acb_id_;
+  acb_id_ = 0;
+  acb_loaded_ = false;
+}
+
+void ApplicationSdl::ApplyAcbWindowLocked() {
+  if (!acb_id_ || !acb_loaded_ || acb_window_.w <= 0 || acb_window_.h <= 0 ||
+      std::memcmp(&acb_window_, &acb_applied_window_, sizeof(acb_window_)) ==
+          0) {
+    return;
+  }
+  const bool full_screen = acb_window_.x == 0 && acb_window_.y == 0 &&
+                           acb_window_.w >= 1920 && acb_window_.h >= 1080;
+  long task_id = 0;
+  GetAcbApi()->set_display_window(acb_id_, acb_window_.x, acb_window_.y,
+                                  acb_window_.w, acb_window_.h, full_screen,
+                                  &task_id);
+  acb_applied_window_ = acb_window_;
+  SB_LOG(INFO) << "ACB display window " << acb_window_.x << ","
+               << acb_window_.y << " " << acb_window_.w << "x"
+               << acb_window_.h << (full_screen ? " fullscreen" : "");
+}
+
+void ApplicationSdl::SetStarfishMediaId(const char* media_id) {
+  ScopedLock lock(exported_geometry_mutex_);
+  if (!acb_id_ || !media_id || !*media_id) {
+    return;
+  }
+  acb_loaded_ = false;
+  acb_play_state_ = -1;
+  acb_applied_window_ = {0, 0, 0, 0};
+  GetAcbApi()->set_media_id(acb_id_, media_id);
+  SB_LOG(INFO) << "ACB media id " << media_id;
+}
+
+void ApplicationSdl::OnStarfishEvent(int type, const char* str_value) {
+  ScopedLock lock(exported_geometry_mutex_);
+  if (!acb_id_) {
+    return;
+  }
+  const AcbApi* acb = GetAcbApi();
+  long task_id = 0;
+  if (type == PF_EVENT_TYPE_STR_VIDEO_INFO && str_value) {
+    acb->set_media_video_data(acb_id_, str_value, &task_id);
+  } else if (type == PF_EVENT_TYPE_STR_STATE_UPDATE__LOADCOMPLETED) {
+    acb->set_sink_type(acb_id_, SINK_TYPE_MAIN);
+    acb->set_state(acb_id_, APPSTATE_FOREGROUND, PLAYSTATE_LOADED, &task_id);
+    acb_loaded_ = true;
+    acb_play_state_ = PLAYSTATE_LOADED;
+    ApplyAcbWindowLocked();
+    ApplyAcbPlayStateLocked();
+  } else if (type == PF_EVENT_TYPE_STR_STATE_UPDATE__UNLOADCOMPLETED) {
+    acb->set_state(acb_id_, APPSTATE_FOREGROUND, PLAYSTATE_UNLOADED,
+                   &task_id);
+    acb_loaded_ = false;
+    acb_applied_window_ = {0, 0, 0, 0};
+  }
+}
+
+void ApplicationSdl::ApplyAcbPlayStateLocked() {
+  if (!acb_id_ || !acb_loaded_) {
+    return;
+  }
+  const int state = acb_paused_ ? PLAYSTATE_PAUSED : PLAYSTATE_PLAYING;
+  if (state == acb_play_state_) {
+    return;
+  }
+  long task_id = 0;
+  GetAcbApi()->set_state(acb_id_, APPSTATE_FOREGROUND,
+                         static_cast<AcbAPI_PlayState>(state), &task_id);
+  acb_play_state_ = state;
 }
 
 bool ApplicationSdl::MayHaveSystemEvents() {

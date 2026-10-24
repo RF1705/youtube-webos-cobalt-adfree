@@ -1,0 +1,27 @@
+diff --git a/starboard/linux/shared/media_is_video_supported.cc b/starboard/linux/shared/media_is_video_supported.cc
+--- a/starboard/linux/shared/media_is_video_supported.cc	2026-10-24 13:13:32.523316552 +0300
++++ b/starboard/linux/shared/media_is_video_supported.cc	2026-10-24 13:13:32.543587888 +0300
+@@ -21,6 +21,9 @@
+ #include "starboard/media.h"
+ #include "starboard/shared/libde265/de265_library_loader.h"
+ #include "starboard/shared/starboard/media/media_util.h"
++#if defined(STARBOARD_WEBOS)
++#include "starboard/webos/arm/webos_version.h"
++#endif
+ 
+ using ::starboard::shared::de265::is_de265_supported;
+ using ::starboard::shared::starboard::media::IsSDRVideo;
+@@ -72,8 +75,11 @@
+   // conservative, while advertising the UHD codecs confirmed by hardware
+   // playback on webOS 6.5 devices. A zero dimension means "not constrained".
+   const bool is_avc = video_codec == kSbMediaVideoCodecH264;
+-  const bool is_uhd_codec = video_codec == kSbMediaVideoCodecVp9 ||
+-                            video_codec == kSbMediaVideoCodecAv1;
++  const int webos_major = ::starboard::shared::webos::WebOsMajorVersion();
++  const bool is_uhd_codec =
++      video_codec == kSbMediaVideoCodecVp9 ||
++      (video_codec == kSbMediaVideoCodecAv1 &&
++       (webos_major == 0 || webos_major >= 5));
+   if (!is_avc && !is_uhd_codec) {
+     return false;
+   }

@@ -89,3 +89,18 @@ index f429008e7..1c8476a32 100644
  }
  
  static void WindowHintsCallback(void *userdata, const char *name, const char *oldValue, const char *newValue)
+diff --git a/src/video/wayland/SDL_waylandwebos_foreign.c b/src/video/wayland/SDL_waylandwebos_foreign.c
+index 6685f739c..10884a12f 100644
+--- a/src/video/wayland/SDL_waylandwebos_foreign.c
++++ b/src/video/wayland/SDL_waylandwebos_foreign.c
+@@ -48,6 +48,10 @@ const char *WaylandWebOS_CreateExportedWindow(_THIS, SDL_webOSExportedWindowType
+         SDL_SetError("Failed creating exported window: No video driver data for video device");
+         return NULL;
+     }
++    if (data->webos_foreign == NULL || data->webos_foreign_table == NULL) {
++        SDL_SetError("Failed creating exported window: wl_webos_foreign is not available");
++        return NULL;
++    }
+     if ((window = SDL_GL_GetCurrentWindow()) == NULL) {
+         window = _this->windows;
+         while (window != NULL) {
