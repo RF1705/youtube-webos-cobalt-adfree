@@ -58,6 +58,29 @@ make -C "$repo_root" docker-make.npm
 # untouched and are installed through the existing platform installer.
 bash "$repo_root/scripts/install-ytaf-cobalt-assets.sh" "$cobalt_root"
 "$repo_root/scripts/install-webos-starboard-platform.sh" "$cobalt_root"
+# This opt-in build variant isolates AV1 negotiation failures without changing
+# VP9/H.264 support or the normal hardware video capability policy.
+# Apply after the platform installer because that script patches upstream Cobalt.
+if [[ "${YTAF_TEST_DISABLE_AV1:-false}" == "true" ]]; then
+  capability_source="$cobalt_root/starboard/linux/shared/media_is_video_supported.cc"
+  python3 - "$capability_source" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+old = '''  const bool is_uhd_codec = video_codec == kSbMediaVideoCodecVp9 ||
+                            video_codec == kSbMediaVideoCodecAv1;'''
+new = '''  // Experimental AV1 opt-out for issue #110. VP9 UHD remains available.
+  const bool is_uhd_codec = video_codec == kSbMediaVideoCodecVp9;'''
+if source.count(old) != 1:
+    raise SystemExit("Cannot apply AV1 test opt-out: unexpected capability source")
+path.write_text(source.replace(old, new, 1))
+PY
+  grep -Fq 'Experimental AV1 opt-out for issue #110' "$capability_source"
+  echo "Test build: AV1 capability advertisement disabled; VP9/H.264 unchanged."
+fi
+
 mkdir -p "$(dirname "$build_log")"
 
 # Force GN/Ninja to refresh only the generated adblock content while keeping the

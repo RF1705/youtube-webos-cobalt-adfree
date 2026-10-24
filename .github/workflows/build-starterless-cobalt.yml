@@ -24,6 +24,11 @@ on:
         options:
           - "2"
           - "4"
+      disable_av1:
+        description: Test build - do not advertise AV1 (VP9/H.264 remain enabled)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -43,6 +48,7 @@ jobs:
       SDL2_BUNDLE_DIR: ${{ github.workspace }}/workdir/deps/SDL2-2.30.12-webos-abi
       WEBOS_LINUX_SDK_VOLUME: ytaf-webos-linux-sdk
       COBALT_BUILD_TYPE: ${{ inputs.build_type }}
+      YTAF_TEST_DISABLE_AV1: ${{ inputs.disable_av1 }}
       NINJA_PARALLEL: ${{ inputs.build_parallel }}
       COBALT_BUILD_LOG: ${{ github.workspace }}/output/cobalt-${{ inputs.build_type }}.log
 
@@ -64,6 +70,7 @@ jobs:
           echo "Repository SHA: $(git rev-parse HEAD)"
           echo "Cobalt ref:     ${{ inputs.cobalt_ref }}"
           echo "Build type:     ${{ inputs.build_type }}"
+          echo "AV1 disabled:   ${{ inputs.disable_av1 }}"
 
       - name: Resolve artifact metadata
         id: meta
@@ -207,7 +214,7 @@ jobs:
           archive_path="$GITHUB_WORKSPACE/output/$archive"
           tar -C "$build_dir" -cJf "$archive_path" cobalt content lib/libfdk-aac.so lib/fdk-aac-build.txt
           sha256sum "$archive_path" > "$archive_path.sha256"
-          printf '%s\n' "repository=$GITHUB_REPOSITORY" "source_ref=$GITHUB_REF_NAME" "source_sha=$SOURCE_SHA" "cobalt_ref=$COBALT_REF" "starboard_api=13" "build_type=$BUILD_TYPE" "archive=$archive" > "$GITHUB_WORKSPACE/output/cobalt-build.txt"
+          printf '%s\n' "repository=$GITHUB_REPOSITORY" "source_ref=$GITHUB_REF_NAME" "source_sha=$SOURCE_SHA" "cobalt_ref=$COBALT_REF" "starboard_api=13" "build_type=$BUILD_TYPE" "disable_av1=${YTAF_TEST_DISABLE_AV1:-false}" "archive=$archive" > "$GITHUB_WORKSPACE/output/cobalt-build.txt"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Upload Cobalt runtime
