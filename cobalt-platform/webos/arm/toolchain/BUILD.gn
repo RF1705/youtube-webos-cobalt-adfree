@@ -32,7 +32,7 @@ gcc_toolchain("target") {
       rebase_path("//out/dav1d-webos-official/src/libdav1d.a", root_build_dir)
   vpx_archive = rebase_path("//out/libvpx-webos/libvpx.a", root_build_dir)
   tail_lib_dependencies =
-      "$dav1d_archive $vpx_archive $webos_sdl2_root/lib/libSDL2.a -lplayerAPIs -lasound -lEGL -lGLESv2 -ldl -lm -lpthread -lrt"
+      "$webos_sdk_root/arm-webos-linux-gnueabi/sysroot/usr/lib/libjson-c.a $dav1d_archive $vpx_archive $webos_sdl2_root/lib/libSDL2.a -lplayerAPIs -lasound -lEGL -lGLESv2 -ldl -lm -lpthread -lrt"
   toolchain_args = {
     is_clang = false
   }

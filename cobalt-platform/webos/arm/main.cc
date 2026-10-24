@@ -17,6 +17,7 @@
 #include "starboard/shared/signal/suspend_signals.h"
 #include "starboard/shared/starboard/link_receiver.h"
 #include "starboard/webos/arm/application_sdl.h"
+#include "starboard/webos/arm/launch_parameters.h"
 
 extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
   // webOS exposes its system PulseAudio server here.  XDG_RUNTIME_DIR points
@@ -121,13 +122,16 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
   std::vector<char*> cobalt_argv;
   cobalt_argv.push_back(argv[0]);
   bool preload = false;
+  std::string launch_url;
   for (int i = 1; i < argc; ++i) {
-    if (argv[i] && argv[i][0] == '{' &&
-        std::strstr(argv[i], "\"@system_native_app\"") != nullptr) {
+    if (argv[i] && argv[i][0] == '{') {
       if (std::strstr(argv[i], "\"preload\":\"semi-full\"") != nullptr ||
           std::strstr(argv[i], "\"event\":\"preload\"") != nullptr) {
         preload = true;
       }
+      const std::string target =
+          starboard::shared::webos::WebosLaunchUrl(argv[i]);
+      if (!target.empty()) launch_url = target;
       continue;
     }
     cobalt_argv.push_back(argv[i]);
@@ -136,6 +140,12 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
   if (preload) {
     cobalt_argv.push_back(preload_switch);
     std::fprintf(stderr, "Translating webOS hidden preload launch.\n");
+  }
+  std::string launch_url_switch;
+  if (!launch_url.empty()) {
+    launch_url_switch = "--link=" + launch_url;
+    cobalt_argv.push_back(const_cast<char*>(launch_url_switch.c_str()));
+    std::fprintf(stderr, "Applying webOS initial content target.\n");
   }
   int result = 0;
   {

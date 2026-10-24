@@ -106,3 +106,35 @@ jobs:
       - name: Run webapp tests
         working-directory: webapp
         run: npm test
+
+  webos-launch-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install launch test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libjson-c-dev pkg-config
+
+      - name: Run webOS launch regressions
+        run: bash scripts/test-webos-launch-parameters.sh
+
+      - name: Check out pinned webOS SDL fixture
+        uses: actions/checkout@v5
+        with:
+          repository: webosbrew/SDL-webOS
+          ref: 263629dab0c89e75f9872eed66e197174952ce02
+          path: workdir/sdl-launch-test
+          sparse-checkout: |
+            src/core/webos
+            src/video/wayland
+
+      - name: Check SDL relaunch patch
+        run: |
+          patch="$GITHUB_WORKSPACE/cobalt-platform/SDL-webOS-2.30.12-relaunch-sigcont.patch"
+          git -C workdir/sdl-launch-test apply --check "$patch"
+          git -C workdir/sdl-launch-test apply "$patch"
+          git -C workdir/sdl-launch-test apply --reverse --check "$patch"

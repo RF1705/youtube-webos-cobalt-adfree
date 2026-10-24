@@ -15,6 +15,7 @@
 #include "starboard/key.h"
 #include "starboard/shared/starboard/audio_sink/audio_sink_internal.h"
 #include "starboard/webos/arm/sdl_wheel_input.h"
+#include "starboard/webos/arm/launch_parameters.h"
 #include "starboard/webos/arm/window_internal.h"
 
 namespace starboard {
@@ -439,6 +440,16 @@ void ApplicationSdl::WakeSystemEventWait() {
 }
 
 ApplicationSdl::Event* ApplicationSdl::TranslateEvent(const SDL_Event& event) {
+  if (event.type == SDL_USEREVENT && event.user.code == kWebosRelaunchEvent) {
+    char* payload = static_cast<char*>(event.user.data1);
+    std::string url = payload ? WebosLaunchUrl(payload) : "";
+    SDL_free(payload);
+    if (!url.empty()) {
+      Link(url.c_str());
+      SB_LOG(INFO) << "Forwarded webOS relaunch content target.";
+    }
+    return nullptr;
+  }
   if (event.type == wake_event_type_) {
     return nullptr;
   }

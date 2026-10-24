@@ -4,6 +4,8 @@ static_library("starboard_platform") {
   sources = [
     "application_sdl.cc",
     "application_sdl.h",
+    "launch_parameters.cc",
+    "launch_parameters.h",
     "main.cc",
     "player_set_bounds.cc",
     "sdl_wheel_input.h",

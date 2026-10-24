@@ -1,5 +1,9 @@
 {
   "id": "youtube.leanback.v4",
+  "dialAppName": "YouTube",
+  "supportQueryRouting": "{\"amazonAlexa\":true, \"googleAssistant\":true}",
+  "inAppSearchParams": "{ \"contentTarget\" : \"q=$SEARCH_KEYWORD\"}",
+  "inAppVoiceIntent": "{\"contentTarget\":{\"intent\":\"$INTENT\",\"intentParam\":\"$INTENT_PARAM\",\"languageCode\":\"$LANG_CODE\",\"voiceEngine\":\"$VOICE_ENGINE\"}}",
   "version": "2.0.2",
   "vendor": "RF1705",
   "type": "native",

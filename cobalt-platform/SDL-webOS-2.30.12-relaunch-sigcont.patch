@@ -1,5 +1,5 @@
 diff --git a/src/core/webos/SDL_webos_init.c b/src/core/webos/SDL_webos_init.c
-index 314751a..8a66e5a 100644
+index b640d9270..361b4598b 100644
 --- a/src/core/webos/SDL_webos_init.c
 +++ b/src/core/webos/SDL_webos_init.c
 @@ -1,6 +1,8 @@
@@ -11,24 +11,62 @@ index 314751a..8a66e5a 100644
  #include "../../events/SDL_events_c.h"
  #include "../../video/SDL_sysvideo.h"
  #include "SDL_error.h"
-@@ -208,6 +210,7 @@ static int lifecycleCallbackVersion1(LSHandle *sh, LSMessage *reply, HContext *c
+@@ -190,12 +192,25 @@ static SDL_bool registerApp(const char *appId, int interfaceVersion)
+     return SDL_TRUE;
+ }
+ 
++/* Forward launch parameters to Cobalt without depending on its C++ ABI. */
++static void sendYtafRelaunch(LSMessage *reply)
++{
++    SDL_Event event;
++    const char *payload = HELPERS_HLunaServiceMessage(reply);
++    if (!payload) return;
++    SDL_zero(event);
++    event.type = SDL_USEREVENT;
++    event.user.code = 0x59544146;
++    event.user.data1 = SDL_strdup(payload);
++    if (event.user.data1 && SDL_PushEvent(&event) <= 0) SDL_free(event.user.data1);
++}
++
+ static int lifecycleCallbackVersion1(LSHandle *sh, LSMessage *reply, HContext *ctx)
+ {
+     jdomparser_ref parser = NULL;
+     jvalue_ref parsed = NULL;
+     jvalue_ref message = NULL;
+-    SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM, "lifecycleEvent(v1): %s", HELPERS_HLunaServiceMessage(reply));
++    SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM, "lifecycleEvent(v1)");
+     if ((parsed = SDL_webOSJsonParse(HELPERS_HLunaServiceMessage(reply), &parser, 1)) == NULL) {
+         return 0;
+     }
+@@ -207,6 +222,8 @@ static int lifecycleCallbackVersion1(LSHandle *sh, LSMessage *reply, HContext *c
                  if (device->windows) {
                      SDL_RaiseWindow(device->windows);
                  }
 +                kill(getpid(), SIGCONT);
++                sendYtafRelaunch(reply);
              }
          }
      }
-@@ -232,6 +235,7 @@ static int lifecycleCallbackVersion2(LSHandle *sh, LSMessage *reply, HContext *c
+@@ -218,7 +235,7 @@ static int lifecycleCallbackVersion2(LSHandle *sh, LSMessage *reply, HContext *c
+     jdomparser_ref parser = NULL;
+     jvalue_ref parsed = NULL;
+     jvalue_ref message = NULL;
+-    SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM, "lifecycleEvent(v2): %s", HELPERS_HLunaServiceMessage(reply));
++    SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM, "lifecycleEvent(v2)");
+     if ((parsed = SDL_webOSJsonParse(HELPERS_HLunaServiceMessage(reply), &parser, 1)) == NULL) {
+         return 0;
+     }
+@@ -230,6 +247,8 @@ static int lifecycleCallbackVersion2(LSHandle *sh, LSMessage *reply, HContext *c
                  if (device->windows) {
                      SDL_RaiseWindow(device->windows);
                  }
 +                kill(getpid(), SIGCONT);
++                sendYtafRelaunch(reply);
              } else if (SDL_strncmp(message_buf.m_str, "close", message_buf.m_len) == 0) {
                  SDL_SendQuit();
              }
 diff --git a/src/video/wayland/SDL_waylandwebos.c b/src/video/wayland/SDL_waylandwebos.c
-index 20b9038..af40d4c 100644
+index f429008e7..1c8476a32 100644
 --- a/src/video/wayland/SDL_waylandwebos.c
 +++ b/src/video/wayland/SDL_waylandwebos.c
 @@ -184,9 +184,6 @@ static void webos_shell_handle_state(void *data, struct wl_webos_shell_surface *
