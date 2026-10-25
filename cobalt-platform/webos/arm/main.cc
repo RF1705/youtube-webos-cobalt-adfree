@@ -19,6 +19,39 @@
 #include "starboard/webos/arm/application_sdl.h"
 #include "starboard/webos/arm/launch_parameters.h"
 
+namespace {
+
+void ApplySystemLocale() {
+  if (std::getenv("LANG")) {
+    return;
+  }
+  FILE* pipe = popen(
+      "luna-send-pub -n 1 luna://com.webos.settingsservice/getSystemSettings "
+      "'{\"keys\":[\"localeInfo\"]}' 2>/dev/null",
+      "r");
+  if (!pipe) {
+    return;
+  }
+  char reply[4096];
+  const size_t size = std::fread(reply, 1, sizeof(reply) - 1, pipe);
+  pclose(pipe);
+  reply[size] = '\0';
+  const char* ui = std::strstr(reply, "\"UI\"");
+  const char* begin = ui ? std::strchr(ui + 4, '"') : nullptr;
+  const char* end = begin ? std::strchr(begin + 1, '"') : nullptr;
+  if (!end || end - begin <= 1 || end - begin >= 32) {
+    return;
+  }
+  char locale[48];
+  const int length = static_cast<int>(end - begin - 1);
+  std::snprintf(locale, sizeof(locale), "%.*s.UTF-8", length, begin + 1);
+  std::replace(locale, locale + length, '-', '_');
+  setenv("LANG", locale, 1);
+  std::fprintf(stderr, "Using webOS UI locale %s\n", locale);
+}
+
+}
+
 extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
   // webOS exposes its system PulseAudio server here.  XDG_RUNTIME_DIR points
   // at the compositor runtime owned by root, so libpulse cannot discover the
@@ -113,6 +146,7 @@ extern "C" SB_EXPORT_PLATFORM int main(int argc, char** argv) {
 
   std::fprintf(stderr, "\n=== Cobalt starterless process started ===\n");
 
+  ApplySystemLocale();
   tzset();
   starboard::shared::signal::InstallCrashSignalHandlers();
   starboard::shared::signal::InstallDebugSignalHandlers();

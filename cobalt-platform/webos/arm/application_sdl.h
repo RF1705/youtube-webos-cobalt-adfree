@@ -38,6 +38,9 @@ class ApplicationSdl : public starboard::QueueApplication {
   // fallback immediately; a later AcceptFrame() replaces it with the exact
   // HTML video bounds.
   void ConfigureFullscreenVideo();
+  bool UsesAcbVideo() const { return acb_video_; }
+  void SetStarfishMediaId(const char* media_id);
+  void OnStarfishEvent(int type, const char* str_value);
 
  protected:
   void AcceptFrame(SbPlayer player,
@@ -57,6 +60,10 @@ class ApplicationSdl : public starboard::QueueApplication {
 
  private:
   Event* TranslateEvent(const SDL_Event& event);
+  bool CreateAcbLocked();
+  void DestroyAcbLocked();
+  void ApplyAcbWindowLocked();
+  void ApplyAcbPlayStateLocked();
 
   bool sdl_initialized_;
   SbWindow window_;
@@ -64,6 +71,13 @@ class ApplicationSdl : public starboard::QueueApplication {
   void* egl_surface_;
   int egl_config_id_;
   std::string exported_window_id_;
+  bool acb_video_ = false;
+  long acb_id_ = 0;
+  bool acb_loaded_ = false;
+  bool acb_paused_ = true;
+  int acb_play_state_ = -1;
+  SDL_Rect acb_window_{0, 0, 0, 0};
+  SDL_Rect acb_applied_window_{0, 0, 0, 0};
   std::atomic<int> video_width_{0};
   std::atomic<int> video_height_{0};
   SDL_Rect last_video_original_{0, 0, 0, 0};

@@ -189,4 +189,10 @@ if ! grep -q 'LG voiceconductor supplies microphone' \
   git -C "$cobalt_root" apply "$microphone_patch"
 fi
 
+webos4_av1_gate_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-webos4-av1-gate.patch"
+if ! grep -q 'WebOsMajorVersion' "$cobalt_root/starboard/linux/shared/media_is_video_supported.cc"; then
+  git -C "$cobalt_root" apply --check "$webos4_av1_gate_patch"
+  git -C "$cobalt_root" apply "$webos4_av1_gate_patch"
+fi
+
 echo "Installed webos-arm Starboard platform into: $platform_target"
