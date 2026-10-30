@@ -4,7 +4,7 @@
   "supportQueryRouting": "{\"amazonAlexa\":true, \"googleAssistant\":true}",
   "inAppSearchParams": "{ \"contentTarget\" : \"q=$SEARCH_KEYWORD\"}",
   "inAppVoiceIntent": "{\"contentTarget\":{\"intent\":\"$INTENT\",\"intentParam\":\"$INTENT_PARAM\",\"languageCode\":\"$LANG_CODE\",\"voiceEngine\":\"$VOICE_ENGINE\"}}",
-  "version": "2.0.2",
+  "version": "2.0.7",
   "vendor": "RF1705",
   "type": "native",
   "main": "cobalt",

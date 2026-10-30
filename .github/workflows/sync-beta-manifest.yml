@@ -1,0 +1,45 @@
+name: Sync Homebrew beta manifest
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published beta release tag (e.g. v2.0.7-beta)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: homebrew-beta-manifest
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: ${{ (github.event_name == 'release' && github.event.release.prerelease && endsWith(github.event.release.tag_name, '-beta')) || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          persist-credentials: true
+      - name: Sync repository manifest with published asset metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: python3 scripts/sync-beta-manifest.py --tag "$RELEASE_TAG"
+      - name: Commit changes
+        run: |
+          if git diff --quiet -- repo.json; then
+            echo "Manifest already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add repo.json
+          git commit -m "chore(homebrew): sync beta release manifest"
+          git push origin HEAD:main
