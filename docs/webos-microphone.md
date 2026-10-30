@@ -9,6 +9,18 @@ an AF_UNIX stream path containing mono signed 16-bit PCM at 16 kHz. The seven
 Starboard microphone functions expose this input to Cobalt's MediaRecorder
 implementation. No speech-service API key is needed for this route.
 
+On TVs where `recordVoice` fails with error 300 (observed on the C1), the
+backend falls back to `com.webos.service.voiceinput`: it reads `getDevices`,
+selects the first `remote` device, and calls `startStreaming` with
+`deviceId`, `deviceType: "remote"`, `keyType: "thinQtv"` and
+`subscribe: true`. The returned `websocket` is used exactly like the
+voiceconductor path; stop maps to `voiceinput/stopStreaming`. The fallback is
+only selected after the 300 error, so unaffected TVs keep the original route.
+Shutdown is ordered: a stop is sent only after `startStreaming` confirmed a
+session (and therefore a device id). Closing while `getDevices` or
+`startStreaming` is pending prevents a new stream, and a start reply that
+arrives during shutdown is stopped before the session is torn down.
+
 The backend borrows the existing app-named LS2 connection from
 `libhelpers.so.2`, already used by SDL. It checks the exported
 `HLunaServiceBridge::instance()` and `PrivateHandle()` entry points and the
