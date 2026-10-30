@@ -27,9 +27,12 @@ namespace {
 std::string path;
 bool reject_record = false;
 bool reject_register = false;
+bool fallback = false;
+bool fallback_no_device = false;
+bool fallback_reject_stream = false;
 unsigned reply_delay_ms = 0;
 unsigned stop_reply_delay_ms = 0;
-std::atomic<int> stops{0}, cancellations{0}, handles{0};
+std::atomic<int> stops{0}, stream_stops{0}, cancellations{0}, handles{0};
 LSHandle app_bus;
 std::vector<std::pair<LSMessageToken, GSource*>> pending;
 struct Reply {
@@ -46,7 +49,8 @@ gboolean Deliver(gpointer opaque) {
 }
 void Queue(LSHandle* bus, LSFilterFunc callback, void* data,
            const std::string& payload, LSMessageToken token = 42) {
-  unsigned delay = token == 43 ? stop_reply_delay_ms : reply_delay_ms;
+  unsigned delay = (token == 43 || token == 46) ? stop_reply_delay_ms
+                                                : reply_delay_ms;
   GSource* source = delay ? g_timeout_source_new(delay) : g_idle_source_new();
   g_source_set_callback(
       source, Deliver, new Reply{bus, callback, data, payload},
@@ -86,10 +90,47 @@ GMainContext* LSGmainGetContext(LSHandle* bus, LSError*) {
 bool LSCall(LSHandle* bus, const char* uri, const char* payload,
             LSFilterFunc callback, void* data, LSMessageToken* token,
             LSError*) {
+  if (std::strstr(uri, "/getDevices")) {
+    *token = 44;
+    Queue(bus, callback, data,
+          fallback_no_device
+              ? "{\"returnValue\":true,\"devices\":[]}"
+              : "{\"returnValue\":true,\"devices\":[{\"id\":\"remote1\","
+                "\"deviceType\":\"remote\",\"deviceName\":\"test\"}]}",
+          44);
+    return true;
+  }
+  if (std::strstr(uri, "/startStreaming")) {
+    assert(std::strstr(payload, "remote1"));
+    assert(std::strstr(payload, "\"subscribe\":true"));
+    *token = 45;
+    if (fallback_reject_stream) {
+      Queue(bus, callback, data,
+            "{\"returnValue\":false,\"errorCode\":2000,"
+            "\"errorText\":\"fail to find voice device\"}",
+            45);
+    } else {
+      json_object* object = json_object_new_object();
+      json_object_object_add(object, "returnValue",
+                             json_object_new_boolean(true));
+      json_object_object_add(object, "subscribed",
+                             json_object_new_boolean(true));
+      json_object_object_add(object, "websocket",
+                             json_object_new_string(path.c_str()));
+      Queue(bus, callback, data, json_object_to_json_string(object), 45);
+      json_object_put(object);
+    }
+    return true;
+  }
   assert(std::strstr(uri, "/recordVoice"));
   assert(std::strstr(payload, "\"socketType\":\"socket\""));
   *token = 42;
-  if (reject_record) {
+  if (fallback) {
+    Queue(bus, callback, data,
+          "{\"returnValue\":false,\"errorCode\":300,"
+          "\"errorText\":\"precondition not satisfied\"}",
+          42);
+  } else if (reject_record) {
     Queue(bus, callback, data,
           "{\"returnValue\":true,\"event\":\"error\",\"errorCode\":\"6020\","
           "\"errorText\":\"failed to open voice stream\"}");
@@ -109,6 +150,24 @@ bool LSCall(LSHandle* bus, const char* uri, const char* payload,
 bool LSCallOneReply(LSHandle* bus, const char* uri, const char* payload,
                     LSFilterFunc callback, void* data, LSMessageToken* token,
                     LSError*) {
+  if (std::strstr(uri, "/getDevices")) {
+    *token = 44;
+    Queue(bus, callback, data,
+          fallback_no_device
+              ? "{\"returnValue\":true,\"devices\":[]}"
+              : "{\"returnValue\":true,\"devices\":[{\"id\":\"remote1\","
+                "\"deviceType\":\"remote\",\"deviceName\":\"test\"}]}",
+          44);
+    return true;
+  }
+  if (std::strstr(uri, "/stopStreaming")) {
+    assert(fallback_no_device || std::strstr(payload, "remote1"));
+    assert(std::strstr(payload, "\"deviceType\":\"remote\""));
+    ++stream_stops;
+    *token = 46;
+    Queue(bus, callback, data, "{\"returnValue\":true}", 46);
+    return true;
+  }
   assert(std::strstr(uri, "/stopRecordingVoice"));
   assert(std::strstr(payload, "TEST-TICKET"));
   ++stops;
@@ -120,8 +179,8 @@ const char* LSMessageGetPayload(LSMessage* message) {
   return message->payload.c_str();
 }
 bool LSCallCancel(LSHandle*, LSMessageToken token, LSError*) {
-  assert(token == 42 || token == 43);
-  if (token == 42) ++cancellations;
+  assert(token >= 42 && token <= 46);
+  if (token == 42 || token == 44 || token == 45) ++cancellations;
   for (auto it = pending.begin(); it != pending.end();) {
     if (it->first == token) {
       g_source_destroy(it->second);
@@ -222,13 +281,81 @@ int main() {
   }
   std::this_thread::sleep_for(milliseconds(950));
   assert(pending.empty() && handles == 0);
+
+  // C1: voiceconductor returns 300, so capture must fall back to voiceinput.
+  const std::string pcm_path = path;
+  path = std::string(directory) + "/fallback.sock";
+  int fallback_server = socket(AF_UNIX, SOCK_STREAM, 0);
+  assert(fallback_server >= 0);
+  sockaddr_un fallback_address{};
+  fallback_address.sun_family = AF_UNIX;
+  std::strcpy(fallback_address.sun_path, path.c_str());
+  assert(bind(fallback_server,
+              reinterpret_cast<sockaddr*>(&fallback_address),
+              sizeof(fallback_address)) == 0);
+  assert(listen(fallback_server, 1) == 0);
+  std::thread fallback_writer([fallback_server] {
+    int client = accept(fallback_server, nullptr, nullptr);
+    assert(client >= 0);
+    const unsigned char pcm[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    assert(send(client, pcm, sizeof(pcm), 0) ==
+           static_cast<ssize_t>(sizeof(pcm)));
+    std::this_thread::sleep_for(milliseconds(300));
+    close(client);
+  });
+  fallback = true;
+  const int stops_before = stops.load();
+  const int cancels_before = cancellations.load();
+  {
+    ::starboard::shared::webos::LgVoiceCapture fallback_capture(8);
+    assert(fallback_capture.Open());
+    unsigned char fallback_data[16]{};
+    int fallback_received = 0;
+    auto fallback_deadline = steady_clock::now() + seconds(2);
+    while (fallback_received == 0 &&
+           steady_clock::now() < fallback_deadline) {
+      fallback_received = fallback_capture.Read(fallback_data,
+                                                sizeof(fallback_data));
+      if (fallback_received == 0)
+        std::this_thread::sleep_for(milliseconds(10));
+    }
+    assert(fallback_received == 8);
+    for (int i = 0; i < 8; ++i) assert(fallback_data[i] == i + 1);
+    fallback_capture.Close();
+  }
+  fallback_writer.join();
+  close(fallback_server);
+  fallback = false;
+  assert(stops == stops_before);
+  assert(stream_stops == 1);
+  assert(cancellations == cancels_before + 3);
+  assert(handles == 0);
+
+  // No remote in the device list must fail cleanly instead of hanging.
+  fallback = true;
+  fallback_no_device = true;
+  {
+    ::starboard::shared::webos::LgVoiceCapture no_device(8);
+    assert(no_device.Open());
+    auto no_device_deadline = steady_clock::now() + seconds(1);
+    while (no_device.Error().empty() &&
+           steady_clock::now() < no_device_deadline)
+      std::this_thread::sleep_for(milliseconds(10));
+    assert(no_device.Error().find("no remote device") != std::string::npos);
+    no_device.Close();
+  }
+  fallback_no_device = false;
+  fallback = false;
+  assert(handles == 0);
+
   unlink(path.c_str());
+  unlink(pcm_path.c_str());
   rmdir(directory);
   g_main_loop_quit(app_loop);
   app_dispatch.join();
   g_main_loop_unref(app_loop);
   g_main_context_unref(app_bus.context);
   std::puts(
-      "LG voice capture: PCM, overflow, reopen, shutdown and service failures "
-      "passed");
+      "LG voice capture: PCM, overflow, reopen, shutdown, service failures and "
+      "C1 fallback passed");
 }

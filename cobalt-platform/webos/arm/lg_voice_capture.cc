@@ -27,6 +27,11 @@ namespace {
 const char kRecord[] = "luna://com.webos.service.voiceconductor/recordVoice";
 const char kStop[] =
     "luna://com.webos.service.voiceconductor/stopRecordingVoice";
+// C1 voiceconductor rejects app recordVoice with 300. The raw voiceinput
+// service still exposes the remote microphone, so use it as a fallback.
+const char kDevices[] = "luna://com.webos.service.voiceinput/getDevices";
+const char kStream[] = "luna://com.webos.service.voiceinput/startStreaming";
+const char kStreamStop[] = "luna://com.webos.service.voiceinput/stopStreaming";
 
 std::string StringField(json_object* object, const char* key) {
   json_object* value = nullptr;
@@ -34,6 +39,16 @@ std::string StringField(json_object* object, const char* key) {
       !json_object_is_type(value, json_type_string))
     return {};
   return json_object_get_string(value);
+}
+
+std::string ErrorCode(json_object* object) {
+  json_object* value = nullptr;
+  if (!json_object_object_get_ex(object, "errorCode", &value)) return "-1";
+  if (json_object_is_type(value, json_type_string))
+    return json_object_get_string(value);
+  if (json_object_is_type(value, json_type_int))
+    return std::to_string(json_object_get_int(value));
+  return "-1";
 }
 }  // namespace
 
@@ -57,6 +72,11 @@ struct LgVoiceCapture::Impl {
   GMainContext* bus_context = nullptr;
   LSMessageToken token = LSMESSAGE_TOKEN_INVALID;
   LSMessageToken stop_token = LSMESSAGE_TOKEN_INVALID;
+  LSMessageToken device_token = LSMESSAGE_TOKEN_INVALID;
+  LSMessageToken fallback_token = LSMESSAGE_TOKEN_INVALID;
+  bool fallback_requested = false;
+  bool fallback_active = false;
+  std::string device_id;
   int audio_fd = -1;
   bool connecting = false;
   std::string pending_path;
@@ -101,19 +121,21 @@ struct LgVoiceCapture::Impl {
     task.cv.wait(lock, [&task] { return task.done; });
   }
 
-  static bool QueueRecord(LSHandle*, LSMessage* message, void* opaque) {
+  static bool QueuePayload(LSMessage* message, void* opaque,
+                           void (Impl::*handler)(const std::string&)) {
     auto* self = static_cast<Impl*>(opaque);
     struct Reply {
       Impl* self;
       std::string payload;
+      void (Impl::*handler)(const std::string&);
     };
-    auto* reply = new Reply{self, LSMessageGetPayload(message)};
+    auto* reply = new Reply{self, LSMessageGetPayload(message), handler};
     GSource* source = g_idle_source_new();
     g_source_set_callback(
         source,
         [](gpointer opaque) -> gboolean {
           auto* reply = static_cast<Reply*>(opaque);
-          reply->self->OnRecord(reply->payload);
+          (reply->self->*reply->handler)(reply->payload);
           return G_SOURCE_REMOVE;
         },
         reply, [](gpointer opaque) { delete static_cast<Reply*>(opaque); });
@@ -122,7 +144,137 @@ struct LgVoiceCapture::Impl {
     return true;
   }
 
+  static bool QueueRecord(LSHandle*, LSMessage* message, void* opaque) {
+    return QueuePayload(message, opaque, &Impl::OnRecord);
+  }
+
+  static bool QueueDevices(LSHandle*, LSMessage* message, void* opaque) {
+    return QueuePayload(message, opaque, &Impl::OnDevices);
+  }
+
+  static bool QueueStream(LSHandle*, LSMessage* message, void* opaque) {
+    return QueuePayload(message, opaque, &Impl::OnStream);
+  }
+
+  void AdoptStream(json_object* object) {
+    std::string ticket = StringField(object, "voiceTicket");
+    std::string path = StringField(object, "websocket");
+    if (!ticket.empty()) this->ticket = ticket;
+    if (stopping) RequestStopRecording();
+    if (!stopping && !path.empty() && audio_fd < 0 && pending_path.empty()) {
+      pending_path = path;
+      connect_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    }
+    std::string event = StringField(object, "event");
+    if (event == "stop" || event == "end" || event == "cancel") {
+      std::lock_guard<std::mutex> lock(mutex);
+      ended = true;
+    }
+  }
+
+  void StartFallback() {
+    LSError ls_error;
+    LSErrorInit(&ls_error);
+    OnBus([&] {
+      if (!LSCallOneReply(bus, kDevices, "{}", QueueDevices, this,
+                          &device_token, &ls_error))
+        Fail("voiceinput getDevices call failed");
+    });
+    LSErrorFree(&ls_error);
+  }
+
+  void StartStreaming() {
+    json_object* request = json_object_new_object();
+    json_object_object_add(request, "deviceId",
+                           json_object_new_string(device_id.c_str()));
+    json_object_object_add(request, "deviceType",
+                           json_object_new_string("remote"));
+    json_object_object_add(request, "keyType",
+                           json_object_new_string("thinQtv"));
+    json_object_object_add(request, "subscribe", json_object_new_boolean(true));
+    std::string body = json_object_to_json_string_ext(
+        request, JSON_C_TO_STRING_PLAIN);
+    json_object_put(request);
+    LSError ls_error;
+    LSErrorInit(&ls_error);
+    OnBus([&] {
+      if (!LSCall(bus, kStream, body.c_str(), QueueStream, this,
+                  &fallback_token, &ls_error))
+        Fail("voiceinput startStreaming call failed");
+    });
+    LSErrorFree(&ls_error);
+  }
+
+  void OnDevices(const std::string& payload) {
+    json_object* object = json_tokener_parse(payload.c_str());
+    if (!object) {
+      Fail("voiceinput getDevices returned invalid JSON");
+      return;
+    }
+    json_object* result = nullptr;
+    json_object* devices = nullptr;
+    bool ok = json_object_object_get_ex(object, "returnValue", &result) &&
+              json_object_get_boolean(result) &&
+              json_object_object_get_ex(object, "devices", &devices) &&
+              json_object_is_type(devices, json_type_array);
+    if (ok) {
+      const int count = json_object_array_length(devices);
+      for (int i = 0; i < count && device_id.empty(); ++i) {
+        json_object* device = json_object_array_get_idx(devices, i);
+        if (StringField(device, "deviceType") == "remote") {
+          std::string id = StringField(device, "id");
+          if (!id.empty()) device_id = id;
+        }
+      }
+    }
+    json_object_put(object);
+    if (device_id.empty()) {
+      Fail("voiceinput has no remote device");
+      return;
+    }
+    StartStreaming();
+  }
+
+  void OnStream(const std::string& payload) {
+    json_object* object = json_tokener_parse(payload.c_str());
+    if (!object) {
+      Fail("voiceinput startStreaming returned invalid JSON");
+      return;
+    }
+    json_object* result = nullptr;
+    bool ok = json_object_object_get_ex(object, "returnValue", &result) &&
+              json_object_get_boolean(result);
+    if (!ok) {
+      Fail("startStreaming failed (" + ErrorCode(object) +
+           "): " + StringField(object, "errorText").substr(0, 160));
+      json_object_put(object);
+      return;
+    }
+    if (fallback_active) {
+      // Later subscription messages must not reopen the PCM socket.
+      std::string event = StringField(object, "event");
+      if (event == "stop" || event == "end" || event == "cancel") {
+        std::lock_guard<std::mutex> lock(mutex);
+        ended = true;
+      }
+      json_object_put(object);
+      return;
+    }
+    fallback_active = true;
+    std::string path = StringField(object, "websocket");
+    if (path.empty()) path = "/tmp/voiceinput_" + device_id + ".soc";
+    if (!path.empty() && audio_fd < 0 && pending_path.empty()) {
+      pending_path = path;
+      connect_deadline =
+          std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    }
+    if (stopping) RequestStopRecording();
+    json_object_put(object);
+  }
+
   void OnRecord(const std::string& payload) {
+    if (fallback_requested) return;
     auto* self = this;
     json_object* object = json_tokener_parse(payload.c_str());
     if (!object) {
@@ -133,27 +285,19 @@ struct LgVoiceCapture::Impl {
     if (StringField(object, "event") == "error" ||
         (json_object_object_get_ex(object, "returnValue", &result) &&
          !json_object_get_boolean(result))) {
-      json_object* code = nullptr;
-      json_object_object_get_ex(object, "errorCode", &code);
-      self->Fail("recordVoice failed (" +
-                 std::string(code ? json_object_get_string(code) : "-1") +
+      std::string code = ErrorCode(object);
+      if (code == "300") {
+        // The C1 voiceconductor rejects app capture before audio. Try the raw
+        // voiceinput path once; later recordVoice replies are ignored.
+        self->fallback_requested = true;
+        json_object_put(object);
+        self->StartFallback();
+        return;
+      }
+      self->Fail("recordVoice failed (" + code +
                  "): " + StringField(object, "errorText").substr(0, 160));
     } else {
-      std::string ticket = StringField(object, "voiceTicket");
-      std::string path = StringField(object, "websocket");
-      if (!ticket.empty()) self->ticket = ticket;
-      if (self->stopping) self->RequestStopRecording();
-      if (!self->stopping && !path.empty() && self->audio_fd < 0 &&
-          self->pending_path.empty()) {
-        self->pending_path = path;
-        self->connect_deadline =
-            std::chrono::steady_clock::now() + std::chrono::seconds(2);
-      }
-      std::string event = StringField(object, "event");
-      if (event == "stop" || event == "end" || event == "cancel") {
-        std::lock_guard<std::mutex> lock(self->mutex);
-        self->ended = true;
-      }
+      self->AdoptStream(object);
     }
     json_object_put(object);
   }
@@ -286,7 +430,30 @@ struct LgVoiceCapture::Impl {
   }
 
   void RequestStopRecording() {
-    if (!bus || ticket.empty() || stop_sent) return;
+    if (!bus || stop_sent) return;
+    if (fallback_requested || fallback_active) {
+      stop_sent = true;
+      json_object* request = json_object_new_object();
+      if (!device_id.empty())
+        json_object_object_add(request, "deviceId",
+                               json_object_new_string(device_id.c_str()));
+      json_object_object_add(request, "deviceType",
+                             json_object_new_string("remote"));
+      json_object_object_add(request, "keyType",
+                             json_object_new_string("thinQtv"));
+      std::string body = json_object_to_json_string_ext(
+          request, JSON_C_TO_STRING_PLAIN);
+      json_object_put(request);
+      LSError ls_error;
+      LSErrorInit(&ls_error);
+      OnBus([&] {
+        LSCallOneReply(bus, kStreamStop, body.c_str(), StopReply, this,
+                       &stop_token, &ls_error);
+      });
+      LSErrorFree(&ls_error);
+      return;
+    }
+    if (ticket.empty()) return;
     stop_sent = true;
     LSError ls_error;
     LSErrorInit(&ls_error);
@@ -361,7 +528,7 @@ struct LgVoiceCapture::Impl {
     if (bus) {
       // The barrier also drains callbacks already running on the shared bus.
       OnBus([&] {
-        for (auto value : {token, stop_token}) {
+        for (auto value : {token, stop_token, device_token, fallback_token}) {
           LSErrorInit(&ls_error);
           if (value != LSMESSAGE_TOKEN_INVALID)
             LSCallCancel(bus, value, &ls_error);
@@ -382,6 +549,11 @@ struct LgVoiceCapture::Impl {
       loop = nullptr;
       registered = false;
       ticket.clear();
+      fallback_requested = false;
+      fallback_active = false;
+      device_id.clear();
+      device_token = LSMESSAGE_TOKEN_INVALID;
+      fallback_token = LSMESSAGE_TOKEN_INVALID;
       pending_path.clear();
       pending_byte = false;
       first_byte = 0;
@@ -415,6 +587,10 @@ bool LgVoiceCapture::Open() {
     impl_->error.clear();
     impl_->token = LSMESSAGE_TOKEN_INVALID;
     impl_->stop_token = LSMESSAGE_TOKEN_INVALID;
+    impl_->device_token = LSMESSAGE_TOKEN_INVALID;
+    impl_->fallback_token = LSMESSAGE_TOKEN_INVALID;
+    impl_->fallback_requested = impl_->fallback_active = false;
+    impl_->device_id.clear();
   }
   impl_->worker = std::thread([this] { impl_->Run(); });
   std::unique_lock<std::mutex> lock(impl_->mutex);
