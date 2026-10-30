@@ -11,6 +11,20 @@ permissions:
   contents: read
 
 jobs:
+  starfish-rate-replay-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test bounded replay and actual native rate transitions
+        run: |
+          c++ -std=c++14 -Wall -Wextra -Werror -I cobalt-platform/webos/arm \
+            scripts/test-starfish-rate-replay.cc -o "$RUNNER_TEMP/rate-replay"
+          "$RUNNER_TEMP/rate-replay"
+          c++ -std=c++14 -Wall -Wextra -Werror -I cobalt-platform/webos/arm \
+            scripts/test-starfish-av-session-state.cc -o "$RUNNER_TEMP/av-state"
+          "$RUNNER_TEMP/av-state"
+          python3 scripts/test-starfish-rate-transition.py
+
   webos-microphone-test:
     runs-on: ubuntu-latest
 

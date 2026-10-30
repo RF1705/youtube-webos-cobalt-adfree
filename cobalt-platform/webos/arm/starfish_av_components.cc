@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -23,6 +24,7 @@
 #include "starboard/webos/arm/starfish_audio_timing.h"
 #include "starboard/webos/arm/starfish_av_session_state.h"
 #include "starboard/webos/arm/starfish_video_configuration.h"
+#include "starboard/webos/arm/starfish_rate_replay.h"
 
 namespace starboard {
 namespace shared {
@@ -71,6 +73,37 @@ void TraceEssential(const char* format, ...) {
   va_start(args, format);
   TraceV(true, format, args);
   va_end(args);
+}
+
+// Independent budget: normal playback must not consume rate diagnostics.
+// At most 512 lines/process; the existing 16 MiB rotating log still applies.
+void TraceRate(const char* format, ...) {
+  static std::atomic<unsigned> count{0};
+  unsigned value = count.load();
+  do {
+    if (value >= 512) return;
+  } while (!count.compare_exchange_weak(value, value + 1));
+  char message[1024];
+  va_list args;
+  va_start(args, format);
+  std::vsnprintf(message, sizeof(message), format, args);
+  va_end(args);
+  std::fprintf(stderr, "[YTAF rate monotonic_us=%lld] %s\n",
+               static_cast<long long>(SbTimeGetMonotonicNow()), message);
+  std::fflush(stderr);
+}
+
+bool RateReplayEnabled() {
+  static const bool enabled = [] {
+    const char* env = std::getenv("YTAF_RATE_REPLAY");
+    if (env) return std::strcmp(env, "0") != 0;
+    FILE* marker = std::fopen("/tmp/ytaf-rate-replay.enable", "r");
+    if (!marker) return true;
+    const int value = std::fgetc(marker);
+    std::fclose(marker);
+    return value != '0';
+  }();
+  return enabled;
 }
 
 const char* CodecName(SbMediaVideoCodec codec) {
@@ -219,6 +252,19 @@ struct NativeSession {
     size_t max_queued_bytes = 0;
   };
 
+  using Replay = StarfishRateReplay<State::Packet>;
+  Replay audio_history{1024, 1024 * 1024, false};
+  Replay video_history{2048, 16 * 1024 * 1024, true};
+  std::deque<Replay::Entry> audio_replay, video_replay;
+  bool replaying = false;
+  unsigned packet_traces = 0;
+  SbTime rate_changed_at = 0, next_rate_trace = 0;
+  int64_t rate_frame = -1, audio_pts = -1, video_pts = -1, keyframe_pts = -1;
+  uint64_t audio_limit_hits = 0, video_limit_hits = 0;
+  std::atomic<uint64_t> frame_count{0}, event_count{0};
+  std::atomic<int> last_event{0};
+  std::atomic<int64_t> last_event_value{0};
+
   explicit NativeSession(uint64_t id) : generation(id) {}
   const uint64_t generation;
   std::atomic<bool> loaded{false}, unloaded{false}, failed{false}, ended{false};
@@ -242,8 +288,14 @@ struct NativeSession {
     if (type != PF_EVENT_TYPE_FRAMEREADY) {
       ApplicationSdl::Get()->OnStarfishEvent(type, text);
     }
+    if (type != PF_EVENT_TYPE_FRAMEREADY) {
+      self->last_event.store(type);
+      self->last_event_value.store(value);
+      self->event_count.fetch_add(1);
+    }
     switch (type) {
-      case PF_EVENT_TYPE_FRAMEREADY: self->frame_ns.store(value); break;
+      case PF_EVENT_TYPE_FRAMEREADY:
+        self->frame_ns.store(value); self->frame_count.fetch_add(1); break;
       case PF_EVENT_TYPE_STR_STATE_UPDATE__LOADCOMPLETED: self->loaded.store(true); break;
       case PF_EVENT_TYPE_STR_STATE_UPDATE__UNLOADCOMPLETED: self->unloaded.store(true); break;
       case PF_EVENT_TYPE_STR_STATE_UPDATE__ENDOFSTREAM: self->ended.store(true); break;
@@ -407,6 +459,9 @@ class Owner : public player::JobQueue::JobOwner {
         !state_.Reset() || lease.load() == 2) {
       FailLocked("invalid shared A/V reset"); return;
     }
+    TraceRate("seek generation=%llu target_us=%lld requested_rate=%.6g",
+              static_cast<unsigned long long>(state_.generation()),
+              static_cast<long long>(target), rate_);
     target_ = current_ = target;
     input_wait_started_ = SbTimeGetMonotonicNow();
     audio_eos_ = video_eos_ = first_audio_ = first_video_ = false;
@@ -422,7 +477,13 @@ class Owner : public player::JobQueue::JobOwner {
     Guard guard(mutex_);
     if (!std::isfinite(rate) || rate < 0 || rate > 2 || (rate > 0 && rate < 0.1))
       FailLocked("unsupported shared A/V rate (supported: 0 or 0.1–2x)");
-    else rate_ = rate;
+    else {
+      if (rate != rate_)
+        TraceRate("request generation=%llu old=%.6g new=%.6g current_us=%lld replay_enabled=%d",
+                  static_cast<unsigned long long>(state_.generation()), rate_, rate,
+                  static_cast<long long>(current_), RateReplayEnabled());
+      rate_ = rate;
+    }
     wake_.notify_one();
   }
   void Volume(double volume) {
@@ -594,11 +655,22 @@ class Owner : public player::JobQueue::JobOwner {
   void Feed(NativeSession& session, Stream stream) {
     for (unsigned i = 0; i < 8 && Current(session.generation); ++i) {
       State::FeedTicket ticket{};
+      auto& replay = stream == Stream::kAudio ? session.audio_replay : session.video_replay;
+      const bool replay_packet = session.replaying;
       {
         Guard guard(mutex_);
-        if (!state_.NextFeed(stream, &ticket)) return;
-        // Bounded input lookahead only; never a second presentation clock.
-        if (ticket.packet.pts_us > current_ + 5 * kSecond) return;
+        if (replay_packet) {
+          if (replay.empty()) return;
+          ticket.generation = session.generation;
+          ticket.stream = stream;
+          ticket.packet = replay.front().packet;
+        } else if (!state_.NextFeed(stream, &ticket)) return;
+        // Keep the same bound during recovery. Log hits rather than hiding a
+        // possible clock/feed deadlock by allowing unbounded lookahead.
+        if (ticket.packet.pts_us > current_ + 5 * kSecond) {
+          ++(stream == Stream::kAudio ? session.audio_limit_hits : session.video_limit_hits);
+          return;
+        }
       }
       if (ticket.generation != session.generation) return;
       if (stream == Stream::kVideo) {
@@ -641,7 +713,19 @@ class Owner : public player::JobQueue::JobOwner {
       size_t queued_bytes = 0;
       {
         Guard guard(mutex_);
-        if (!state_.CompleteFeed(ticket, result)) return;
+        if (state_.generation() != session.generation) return;
+        if (replay_packet) {
+          // Replayed packets have already left the application queue. Never
+          // complete a normal feed ticket or pop a newly queued packet here.
+          if (result == State::FeedResult::kAccepted) replay.pop_front();
+        } else {
+          if (!state_.CompleteFeed(ticket, result)) return;
+          if (result == State::FeedResult::kAccepted) {
+            auto& history = stream == Stream::kAudio ? session.audio_history : session.video_history;
+            history.Accept(ticket.packet, stream == Stream::kVideo &&
+                           ticket.packet.buffer->video_sample_info().is_key_frame, current_);
+          }
+        }
         if (result == State::FeedResult::kError) FailLocked("shared Starfish Feed rejected");
         queued_packets = state_.queued_packets(stream);
         queued_bytes = state_.queued_bytes(stream);
@@ -651,6 +735,17 @@ class Owner : public player::JobQueue::JobOwner {
                                    : session.video_backpressure;
       const SbTime now = SbTimeGetMonotonicNow();
       if (result == State::FeedResult::kAccepted) {
+        (stream == Stream::kAudio ? session.audio_pts : session.video_pts) = ticket.packet.pts_us;
+        const bool key = stream == Stream::kVideo && ticket.packet.buffer->video_sample_info().is_key_frame;
+        if (key) session.keyframe_pts = ticket.packet.pts_us;
+        if (session.rate_changed_at && session.packet_traces < 24) {
+          ++session.packet_traces;
+          TraceRate("feed generation=%llu stream=%s pts_us=%lld key=%d replay=%d queued=%zu/%zu",
+                    static_cast<unsigned long long>(session.generation),
+                    stream == Stream::kAudio ? "audio" : "video",
+                    static_cast<long long>(ticket.packet.pts_us), key, replay_packet,
+                    queued_packets, queued_bytes);
+        }
         (stream == Stream::kAudio ? session.audio_fed : session.video_fed) = true;
         if (pressure.started != 0) {
           const SbTime duration = std::max<SbTime>(0, now - pressure.started);
@@ -698,6 +793,31 @@ class Owner : public player::JobQueue::JobOwner {
     }
   }
 
+  void RateSnapshot(NativeSession& session, const char* reason) {
+    Guard guard(mutex_);
+    State::FeedTicket audio{}, video{};
+    const bool have_audio = state_.NextFeed(Stream::kAudio, &audio);
+    const bool have_video = state_.NextFeed(Stream::kVideo, &video);
+    TraceRate("%s generation=%llu requested=%.6g applied=%.6g current_us=%lld frames=%llu frame_ns=%lld last_audio=%lld last_video=%lld last_key=%lld next_audio=%lld next_video=%lld next_key=%d queue_a=%zu/%zu queue_v=%zu/%zu limit_a=%llu limit_v=%llu replay_a=%zu replay_v=%zu replay_next_a=%lld replay_next_v=%lld retries_a=%u retries_v=%u events=%llu last_event=%d event_value=%lld",
+      reason, static_cast<unsigned long long>(session.generation), rate_, session.rate,
+      static_cast<long long>(current_), static_cast<unsigned long long>(session.frame_count.load()),
+      static_cast<long long>(session.frame_ns.load()), static_cast<long long>(session.audio_pts),
+      static_cast<long long>(session.video_pts), static_cast<long long>(session.keyframe_pts),
+      static_cast<long long>(have_audio ? audio.packet.pts_us : -1),
+      static_cast<long long>(have_video ? video.packet.pts_us : -1),
+      have_video && video.packet.buffer->video_sample_info().is_key_frame,
+      state_.queued_packets(Stream::kAudio), state_.queued_bytes(Stream::kAudio),
+      state_.queued_packets(Stream::kVideo), state_.queued_bytes(Stream::kVideo),
+      static_cast<unsigned long long>(session.audio_limit_hits),
+      static_cast<unsigned long long>(session.video_limit_hits),
+      session.audio_replay.size(), session.video_replay.size(),
+      static_cast<long long>(session.audio_replay.empty() ? -1 : session.audio_replay.front().packet.pts_us),
+      static_cast<long long>(session.video_replay.empty() ? -1 : session.video_replay.front().packet.pts_us),
+      session.audio_backpressure.total_retries, session.video_backpressure.total_retries,
+      static_cast<unsigned long long>(session.event_count.load()), session.last_event.load(),
+      static_cast<long long>(session.last_event_value.load()));
+  }
+
   void Step(NativeSession& session) {
     if (session.failed.load()) {
       FailSession(session, FormatString("shared Starfish error type=%d value=%lld", session.error_type.load(),
@@ -714,6 +834,10 @@ class Owner : public player::JobQueue::JobOwner {
     // Feed while initially paused too, so the worker can finish preroll without
     // an unsolicited Play. Never Play just to obtain LOADCOMPLETED/first frame.
     Feed(session, Stream::kAudio); Feed(session, Stream::kVideo);
+    if (session.replaying && session.audio_replay.empty() && session.video_replay.empty()) {
+      session.replaying = false;
+      RateSnapshot(session, "replay-drained");
+    }
     if (!Current(session.generation)) return;
     {
       Guard guard(mutex_);
@@ -741,9 +865,37 @@ class Owner : public player::JobQueue::JobOwner {
       session.volume = volume;
     }
     if (loaded && rate > 0 && rate != session.rate) {
+      RateSnapshot(session, "before-rate");
+      bool can_replay = false, audio_ok = false, video_ok = false;
+      {
+        Guard guard(mutex_);
+        if (state_.generation() != session.generation || state_.ended()) return;
+        audio_ok = session.audio_history.Snapshot(current_, &session.audio_replay);
+        video_ok = session.video_history.Snapshot(current_, &session.video_replay);
+        can_replay = audio_ok && video_ok && RateReplayEnabled();
+      }
+      TraceRate("rate-cache generation=%llu usable=%d enabled=%d audio_covered=%d video_covered=%d audio=%zu/%zu video=%zu/%zu first_audio=%lld first_video=%lld",
+                static_cast<unsigned long long>(session.generation), can_replay, RateReplayEnabled(), audio_ok, video_ok,
+                session.audio_history.size(), session.audio_history.bytes(),
+                session.video_history.size(), session.video_history.bytes(),
+                static_cast<long long>(session.audio_replay.empty() ? -1 : session.audio_replay.front().packet.pts_us),
+                static_cast<long long>(session.video_replay.empty() ? -1 : session.video_replay.front().packet.pts_us));
       const auto payload = FormatString("{\"playRate\":%.6g,\"audioOutput\":true}", rate);
       if (!session.api->SetPlayRate(payload.c_str())) { FailSession(session, "shared rate rejected"); return; }
       session.rate = rate;
+      session.rate_changed_at = now;
+      session.next_rate_trace = now;
+      session.rate_frame = session.frame_ns.load();
+      session.packet_traces = 0;
+      session.replaying = can_replay;
+      if (can_replay) {
+        Guard guard(mutex_);
+        if (state_.generation() == session.generation) state_.NativeFlushed();
+        session.ended.store(false);
+      } else {
+        session.audio_replay.clear(); session.video_replay.clear();
+      }
+      RateSnapshot(session, "after-rate");
     }
     if (paused && session.playing) {
       if (!session.api->Pause()) { FailSession(session, "shared Pause rejected"); return; }
@@ -765,6 +917,10 @@ class Owner : public player::JobQueue::JobOwner {
     const int64_t frame_ns = session.frame_ns.load();
     const bool new_frame = frame_ns >= 0 && frame_ns != session.last_frame;
     if (new_frame) {
+      if (session.rate_changed_at && session.rate_frame >= 0 && frame_ns > session.rate_frame) {
+        RateSnapshot(session, "rate-frame-progress");
+        session.rate_frame = -1;
+      }
       if (session.last_frame < 0)
         Trace("first-frame generation=%llu native_ns=%lld presentation_us=%lld",
               static_cast<unsigned long long>(session.generation), static_cast<long long>(frame_ns),
@@ -772,6 +928,11 @@ class Owner : public player::JobQueue::JobOwner {
       session.last_progress = now; session.last_frame = frame_ns;
     }
     if (paused) session.last_progress = now;
+    if (session.rate_changed_at && now >= session.next_rate_trace &&
+        now - session.rate_changed_at <= 21 * kSecond) {
+      RateSnapshot(session, "rate-progress");
+      session.next_rate_trace = now + kSecond;
+    }
     bool submit_eos = false;
     {
       Guard guard(mutex_);
@@ -781,7 +942,7 @@ class Owner : public player::JobQueue::JobOwner {
         current_ = std::max(current_, frame_ns / 1000 - session.plan.epoch_us);
         have_frame_ = true; frame_time_ = now;
       }
-      submit_eos = state_.ReadyToSubmitEos();
+      submit_eos = !session.replaying && state_.ReadyToSubmitEos();
     }
     if (submit_eos) {
       const bool accepted = session.api->pushEOS();
@@ -807,6 +968,7 @@ class Owner : public player::JobQueue::JobOwner {
               static_cast<unsigned long long>(session.generation));
       ApplicationSdl::Get()->SetVideoPaused(true);
     } else if (!paused && now - session.last_progress > 20 * kSecond) {
+      RateSnapshot(session, "stall");
       FailSession(session, "shared A/V presentation stalled for 20 seconds");
     }
     int z, x, y, width, height;
