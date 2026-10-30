@@ -75,6 +75,9 @@ struct LgVoiceCapture::Impl {
   LSMessageToken device_token = LSMESSAGE_TOKEN_INVALID;
   LSMessageToken fallback_token = LSMESSAGE_TOKEN_INVALID;
   bool fallback_requested = false;
+  // startStreaming was issued (or completed) but no successful reply yet.
+  bool stream_requested = false;
+  // voiceinput confirmed a stream; stopStreaming is now allowed.
   bool fallback_active = false;
   std::string device_id;
   int audio_fd = -1;
@@ -174,6 +177,8 @@ struct LgVoiceCapture::Impl {
   }
 
   void StartFallback() {
+    // There is nothing to stop if shutdown already began.
+    if (stopping) return;
     LSError ls_error;
     LSErrorInit(&ls_error);
     OnBus([&] {
@@ -185,6 +190,8 @@ struct LgVoiceCapture::Impl {
   }
 
   void StartStreaming() {
+    // A delayed getDevices reply must never start capture after Close().
+    if (stopping) return;
     json_object* request = json_object_new_object();
     json_object_object_add(request, "deviceId",
                            json_object_new_string(device_id.c_str()));
@@ -198,11 +205,13 @@ struct LgVoiceCapture::Impl {
     json_object_put(request);
     LSError ls_error;
     LSErrorInit(&ls_error);
+    bool called = false;
     OnBus([&] {
-      if (!LSCall(bus, kStream, body.c_str(), QueueStream, this,
-                  &fallback_token, &ls_error))
-        Fail("voiceinput startStreaming call failed");
+      called = LSCall(bus, kStream, body.c_str(), QueueStream, this,
+                      &fallback_token, &ls_error);
+      if (!called) Fail("voiceinput startStreaming call failed");
     });
+    stream_requested = called;
     LSErrorFree(&ls_error);
   }
 
@@ -229,6 +238,7 @@ struct LgVoiceCapture::Impl {
       }
     }
     json_object_put(object);
+    if (stopping) return;
     if (device_id.empty()) {
       Fail("voiceinput has no remote device");
       return;
@@ -236,19 +246,57 @@ struct LgVoiceCapture::Impl {
     StartStreaming();
   }
 
+  void SendStreamStop() {
+    // The device id is guaranteed once startStreaming was issued.
+    if (stop_sent || device_id.empty()) return;
+    stop_sent = true;
+    json_object* request = json_object_new_object();
+    // Only call this once a stream was confirmed, so the device id is valid.
+    json_object_object_add(request, "deviceId",
+                           json_object_new_string(device_id.c_str()));
+    json_object_object_add(request, "deviceType",
+                           json_object_new_string("remote"));
+    json_object_object_add(request, "keyType",
+                           json_object_new_string("thinQtv"));
+    std::string body = json_object_to_json_string_ext(
+        request, JSON_C_TO_STRING_PLAIN);
+    json_object_put(request);
+    LSError ls_error;
+    LSErrorInit(&ls_error);
+    OnBus([&] {
+      if (!LSCallOneReply(bus, kStreamStop, body.c_str(), StopReply, this,
+                          &stop_token, &ls_error))
+        Fail("voiceinput stopStreaming call failed");
+    });
+    LSErrorFree(&ls_error);
+  }
+
   void OnStream(const std::string& payload) {
     json_object* object = json_tokener_parse(payload.c_str());
     if (!object) {
-      Fail("voiceinput startStreaming returned invalid JSON");
+      stream_requested = false;
+      if (stopping) {
+        g_main_loop_quit(loop);
+      } else {
+        Fail("voiceinput startStreaming returned invalid JSON");
+      }
       return;
     }
     json_object* result = nullptr;
     bool ok = json_object_object_get_ex(object, "returnValue", &result) &&
               json_object_get_boolean(result);
     if (!ok) {
-      Fail("startStreaming failed (" + ErrorCode(object) +
-           "): " + StringField(object, "errorText").substr(0, 160));
+      stream_requested = false;
+      std::string reason =
+          "startStreaming failed (" + ErrorCode(object) + "): " +
+          StringField(object, "errorText").substr(0, 160);
       json_object_put(object);
+      if (stopping) {
+        // No stream exists, so there is nothing to stop.
+        g_main_loop_quit(loop);
+      } else {
+        Fail(reason);
+      }
       return;
     }
     if (fallback_active) {
@@ -262,6 +310,14 @@ struct LgVoiceCapture::Impl {
       return;
     }
     fallback_active = true;
+    stream_requested = false;
+    if (stopping) {
+      // A startStreaming reply that arrives during shutdown is the only point
+      // where a stop with a valid device id can be issued.
+      SendStreamStop();
+      json_object_put(object);
+      return;
+    }
     std::string path = StringField(object, "websocket");
     if (path.empty()) path = "/tmp/voiceinput_" + device_id + ".soc";
     if (!path.empty() && audio_fd < 0 && pending_path.empty()) {
@@ -269,7 +325,6 @@ struct LgVoiceCapture::Impl {
       connect_deadline =
           std::chrono::steady_clock::now() + std::chrono::seconds(2);
     }
-    if (stopping) RequestStopRecording();
     json_object_put(object);
   }
 
@@ -291,6 +346,11 @@ struct LgVoiceCapture::Impl {
         // voiceinput path once; later recordVoice replies are ignored.
         self->fallback_requested = true;
         json_object_put(object);
+        if (self->stopping) {
+          // Close() happened before voiceconductor rejected recordVoice.
+          g_main_loop_quit(self->loop);
+          return;
+        }
         self->StartFallback();
         return;
       }
@@ -432,25 +492,11 @@ struct LgVoiceCapture::Impl {
   void RequestStopRecording() {
     if (!bus || stop_sent) return;
     if (fallback_requested || fallback_active) {
-      stop_sent = true;
-      json_object* request = json_object_new_object();
-      if (!device_id.empty())
-        json_object_object_add(request, "deviceId",
-                               json_object_new_string(device_id.c_str()));
-      json_object_object_add(request, "deviceType",
-                             json_object_new_string("remote"));
-      json_object_object_add(request, "keyType",
-                             json_object_new_string("thinQtv"));
-      std::string body = json_object_to_json_string_ext(
-          request, JSON_C_TO_STRING_PLAIN);
-      json_object_put(request);
-      LSError ls_error;
-      LSErrorInit(&ls_error);
-      OnBus([&] {
-        LSCallOneReply(bus, kStreamStop, body.c_str(), StopReply, this,
-                       &stop_token, &ls_error);
-      });
-      LSErrorFree(&ls_error);
+      // Do not issue stopStreaming until voiceinput confirmed a session (and
+      // therefore supplied a device id). A pending startStreaming reply is
+      // handled in OnStream(); a pending getDevices reply is handled by the
+      // stopping checks in OnDevices()/StartStreaming().
+      if (fallback_active) SendStreamStop();
       return;
     }
     if (ticket.empty()) return;
@@ -472,15 +518,31 @@ struct LgVoiceCapture::Impl {
     LSErrorFree(&ls_error);
   }
 
+  static gboolean StopTimeout(gpointer opaque) {
+    auto* self = static_cast<Impl*>(opaque);
+    // startStreaming was sent; its reply may be lost or late. Stop with the
+    // known device id so a stream that did start cannot outlive Close().
+    if (self->fallback_requested && self->stream_requested) {
+      self->SendStreamStop();
+    }
+    return Quit(self);
+  }
+
   static gboolean StopOnLoop(gpointer opaque) {
     auto* self = static_cast<Impl*>(opaque);
     if (self->stopping) return G_SOURCE_REMOVE;
     self->stopping = true;
     self->RequestStopRecording();
-    // Allow late recordVoice replies time to deliver their recording ticket.
-    // Keep shutdown bounded if the service never responds.
+    // A fallback without a confirmed or in-flight stream has nothing to stop;
+    // do not wait for a stop reply that will never come.
+    if (self->fallback_requested && !self->fallback_active &&
+        !self->stream_requested) {
+      return Quit(self);
+    }
+    // Allow late recordVoice/startStreaming replies time to deliver their
+    // ticket or stream. Keep shutdown bounded if the service never responds.
     GSource* source = g_timeout_source_new(2000);
-    g_source_set_callback(source, Quit, self, nullptr);
+    g_source_set_callback(source, StopTimeout, self, nullptr);
     g_source_attach(source, self->context);
     g_source_unref(source);
     return G_SOURCE_REMOVE;
@@ -550,6 +612,7 @@ struct LgVoiceCapture::Impl {
       registered = false;
       ticket.clear();
       fallback_requested = false;
+      stream_requested = false;
       fallback_active = false;
       device_id.clear();
       device_token = LSMESSAGE_TOKEN_INVALID;
@@ -589,7 +652,8 @@ bool LgVoiceCapture::Open() {
     impl_->stop_token = LSMESSAGE_TOKEN_INVALID;
     impl_->device_token = LSMESSAGE_TOKEN_INVALID;
     impl_->fallback_token = LSMESSAGE_TOKEN_INVALID;
-    impl_->fallback_requested = impl_->fallback_active = false;
+    impl_->fallback_requested = impl_->stream_requested =
+        impl_->fallback_active = false;
     impl_->device_id.clear();
   }
   impl_->worker = std::thread([this] { impl_->Run(); });

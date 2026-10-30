@@ -32,7 +32,11 @@ bool fallback_no_device = false;
 bool fallback_reject_stream = false;
 unsigned reply_delay_ms = 0;
 unsigned stop_reply_delay_ms = 0;
+unsigned devices_delay_ms = 0;
+unsigned stream_delay_ms = 0;
+unsigned late_subscription_delay_ms = 0;
 std::atomic<int> stops{0}, stream_stops{0}, cancellations{0}, handles{0};
+std::atomic<int> stream_calls{0}, device_calls{0};
 LSHandle app_bus;
 std::vector<std::pair<LSMessageToken, GSource*>> pending;
 struct Reply {
@@ -47,10 +51,16 @@ gboolean Deliver(gpointer opaque) {
   reply->callback(reply->bus, &message, reply->data);
   return G_SOURCE_REMOVE;
 }
+unsigned DelayFor(LSMessageToken token) {
+  if (token == 43 || token == 46) return stop_reply_delay_ms;
+  if (token == 44) return devices_delay_ms ? devices_delay_ms : reply_delay_ms;
+  if (token == 45) return stream_delay_ms ? stream_delay_ms : reply_delay_ms;
+  return reply_delay_ms;
+}
 void Queue(LSHandle* bus, LSFilterFunc callback, void* data,
-           const std::string& payload, LSMessageToken token = 42) {
-  unsigned delay = (token == 43 || token == 46) ? stop_reply_delay_ms
-                                                : reply_delay_ms;
+           const std::string& payload, LSMessageToken token = 42,
+           unsigned delay = ~0u) {
+  if (delay == ~0u) delay = DelayFor(token);
   GSource* source = delay ? g_timeout_source_new(delay) : g_idle_source_new();
   g_source_set_callback(
       source, Deliver, new Reply{bus, callback, data, payload},
@@ -104,6 +114,7 @@ bool LSCall(LSHandle* bus, const char* uri, const char* payload,
     assert(std::strstr(payload, "remote1"));
     assert(std::strstr(payload, "\"subscribe\":true"));
     *token = 45;
+    ++stream_calls;
     if (fallback_reject_stream) {
       Queue(bus, callback, data,
             "{\"returnValue\":false,\"errorCode\":2000,"
@@ -117,7 +128,10 @@ bool LSCall(LSHandle* bus, const char* uri, const char* payload,
                              json_object_new_boolean(true));
       json_object_object_add(object, "websocket",
                              json_object_new_string(path.c_str()));
-      Queue(bus, callback, data, json_object_to_json_string(object), 45);
+      std::string body = json_object_to_json_string(object);
+      Queue(bus, callback, data, body, 45);
+      if (late_subscription_delay_ms)
+        Queue(bus, callback, data, body, 45, late_subscription_delay_ms);
       json_object_put(object);
     }
     return true;
@@ -152,6 +166,7 @@ bool LSCallOneReply(LSHandle* bus, const char* uri, const char* payload,
                     LSError*) {
   if (std::strstr(uri, "/getDevices")) {
     *token = 44;
+    ++device_calls;
     Queue(bus, callback, data,
           fallback_no_device
               ? "{\"returnValue\":true,\"devices\":[]}"
@@ -161,7 +176,8 @@ bool LSCallOneReply(LSHandle* bus, const char* uri, const char* payload,
     return true;
   }
   if (std::strstr(uri, "/stopStreaming")) {
-    assert(fallback_no_device || std::strstr(payload, "remote1"));
+    // Stop only after a stream was confirmed, so the device id must be valid.
+    assert(std::strstr(payload, "\"deviceId\":\"remote1\""));
     assert(std::strstr(payload, "\"deviceType\":\"remote\""));
     ++stream_stops;
     *token = 46;
@@ -348,6 +364,135 @@ int main() {
   fallback = false;
   assert(handles == 0);
 
+  // Fallback lifecycle: Close() must never leave a streaming session behind.
+  path = std::string(directory) + "/lifecycle.sock";
+  int lifecycle_server = socket(AF_UNIX, SOCK_STREAM, 0);
+  assert(lifecycle_server >= 0);
+  sockaddr_un lifecycle_address{};
+  lifecycle_address.sun_family = AF_UNIX;
+  std::strcpy(lifecycle_address.sun_path, path.c_str());
+  assert(bind(lifecycle_server,
+              reinterpret_cast<sockaddr*>(&lifecycle_address),
+              sizeof(lifecycle_address)) == 0);
+  // Connections may queue without accept(); these tests never read audio.
+  assert(listen(lifecycle_server, 16) == 0);
+  auto wait_for = [](auto predicate) {
+    auto limit = steady_clock::now() + seconds(2);
+    while (!predicate() && steady_clock::now() < limit)
+      std::this_thread::sleep_for(milliseconds(2));
+    return predicate();
+  };
+
+  // Closing while getDevices is pending must not start or stop a stream.
+  {
+    fallback = true;
+    devices_delay_ms = 400;
+    int calls_before = stream_calls.load();
+    int stops_before = stream_stops.load();
+    int devices_before = device_calls.load();
+    {
+      ::starboard::shared::webos::LgVoiceCapture pending_devices(8);
+      assert(pending_devices.Open());
+      assert(wait_for([&] { return device_calls.load() > devices_before; }));
+      pending_devices.Close();
+    }
+    assert(stream_calls.load() == calls_before);
+    assert(stream_stops.load() == stops_before);
+    std::this_thread::sleep_for(milliseconds(500));
+    assert(stream_calls.load() == calls_before);
+    assert(stream_stops.load() == stops_before);
+    assert(handles == 0);
+    devices_delay_ms = 0;
+    fallback = false;
+  }
+
+  // Closing while startStreaming is pending must stop the late stream once.
+  {
+    fallback = true;
+    stream_delay_ms = 400;
+    int calls_before = stream_calls.load();
+    int stops_before = stream_stops.load();
+    {
+      ::starboard::shared::webos::LgVoiceCapture pending_stream(8);
+      assert(pending_stream.Open());
+      assert(wait_for([&] { return stream_calls.load() > calls_before; }));
+      pending_stream.Close();
+    }
+    assert(stream_calls.load() == calls_before + 1);
+    assert(stream_stops.load() == stops_before + 1);
+    assert(handles == 0);
+    stream_delay_ms = 0;
+    fallback = false;
+  }
+
+  // A start reply that misses the shutdown window still must not leak a stream.
+  {
+    fallback = true;
+    stream_delay_ms = 2500;
+    int calls_before = stream_calls.load();
+    int stops_before = stream_stops.load();
+    {
+      ::starboard::shared::webos::LgVoiceCapture timed_out(8);
+      assert(timed_out.Open());
+      assert(wait_for([&] { return stream_calls.load() > calls_before; }));
+      auto closed_at = steady_clock::now();
+      timed_out.Close();
+      // Shutdown stays bounded even though the start reply is still pending.
+      assert(steady_clock::now() - closed_at < seconds(5));
+    }
+    assert(stream_calls.load() == calls_before + 1);
+    assert(stream_stops.load() == stops_before + 1);
+    std::this_thread::sleep_for(milliseconds(600));
+    assert(stream_stops.load() == stops_before + 1);
+    assert(pending.empty() && handles == 0);
+    stream_delay_ms = 0;
+    fallback = false;
+  }
+
+  // A late subscription reply after stop must not reopen or double-stop.
+  {
+    fallback = true;
+    stop_reply_delay_ms = 400;
+    late_subscription_delay_ms = 150;
+    int calls_before = stream_calls.load();
+    int stops_before = stream_stops.load();
+    int native_stops_before = stops.load();
+    {
+      ::starboard::shared::webos::LgVoiceCapture late_reply(8);
+      assert(late_reply.Open());
+      assert(wait_for([&] { return stream_calls.load() > calls_before; }));
+      std::this_thread::sleep_for(milliseconds(20));
+      late_reply.Close();
+    }
+    assert(stream_stops.load() == stops_before + 1);
+    assert(stops.load() == native_stops_before);
+    std::this_thread::sleep_for(milliseconds(200));
+    assert(stream_stops.load() == stops_before + 1);
+    assert(pending.empty() && handles == 0);
+    late_subscription_delay_ms = 0;
+    stop_reply_delay_ms = 0;
+    fallback = false;
+  }
+
+  // Repeated Open/Close cycles stop exactly one stream per cycle.
+  {
+    fallback = true;
+    int stops_before = stream_stops.load();
+    int calls_before = stream_calls.load();
+    ::starboard::shared::webos::LgVoiceCapture cycle(8);
+    for (int i = 0; i < 3; ++i) {
+      assert(cycle.Open());
+      int target = calls_before + i + 1;
+      assert(wait_for([&] { return stream_calls.load() >= target; }));
+      cycle.Close();
+    }
+    assert(stream_calls.load() == calls_before + 3);
+    assert(stream_stops.load() == stops_before + 3);
+    assert(pending.empty() && handles == 0);
+    fallback = false;
+  }
+  close(lifecycle_server);
+
   unlink(path.c_str());
   unlink(pcm_path.c_str());
   rmdir(directory);
@@ -356,6 +501,6 @@ int main() {
   g_main_loop_unref(app_loop);
   g_main_context_unref(app_bus.context);
   std::puts(
-      "LG voice capture: PCM, overflow, reopen, shutdown, service failures and "
-      "C1 fallback passed");
+      "LG voice capture: PCM, overflow, reopen, shutdown, service failures, "
+      "C1 fallback and lifecycle races passed");
 }
