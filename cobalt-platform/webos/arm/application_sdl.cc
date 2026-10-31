@@ -366,19 +366,24 @@ bool ApplicationSdl::AcquireExportedVideoWindow() {
     return true;
   }
 
-  const char* exported_window =
-      acb_video_ ? nullptr
-                 : SDL_webOSCreateExportedWindow(
-                       SDL_WEBOS_EXPORED_WINDOW_TYPE_VIDEO);
+  const char* exported_window = SDL_webOSCreateExportedWindow(
+      SDL_WEBOS_EXPORED_WINDOW_TYPE_VIDEO);
   if (!exported_window) {
-    if (!acb_video_) {
-      SB_LOG(WARNING) << "SDL_webOSCreateExportedWindow failed: "
-                      << SDL_GetError() << "; using the webOS 4 ACB path.";
-      acb_video_ = true;
+    // Only the missing Wayland protocol is a supported reason to use ACB.
+    // Other SDL failures must not silently switch backends on newer TVs.
+    const char* error = SDL_GetError();
+    if (!error ||
+        std::strcmp(error,
+                    "Failed creating exported window: wl_webos_foreign is not available") != 0) {
+      SB_LOG(ERROR) << "SDL_webOSCreateExportedWindow failed: "
+                    << (error ? error : "unknown error");
+      return false;
     }
+    SB_LOG(WARNING) << error << "; using the webOS 4 ACB path.";
     if (!CreateAcbLocked()) {
       return false;
     }
+    acb_video_ = true;
     exported_video_clients_ = 1;
     SDL_DisableScreenSaver();
     video_screen_saver_inhibited_ = true;
@@ -404,6 +409,7 @@ void ApplicationSdl::ReleaseExportedVideoWindow() {
   }
   if (acb_id_) {
     DestroyAcbLocked();
+    acb_video_ = false;
     SDL_EnableScreenSaver();
     video_screen_saver_inhibited_ = false;
     return;
