@@ -211,6 +211,9 @@ class StarfishAvSessionState {
     return !failed_ && !eos_submitted_ && audio_.eos && video_.eos &&
            audio_.packets.empty() && video_.packets.empty();
   }
+  // A successful native flushing transition discards the native EOS marker.
+  // Application queues and input EOS remain intact; submit again after replay.
+  void NativeFlushed() { if (!ended_) eos_submitted_ = false; }
   bool EosSubmitted(uint64_t generation) {
     if (generation != generation_ || !ReadyToSubmitEos()) return false;
     eos_submitted_ = true;
