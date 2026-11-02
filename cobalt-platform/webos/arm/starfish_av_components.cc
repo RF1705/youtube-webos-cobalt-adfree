@@ -75,9 +75,11 @@ void TraceEssential(const char* format, ...) {
   va_end(args);
 }
 
+// Devel-only diagnostics; QA/Gold/Debug builds contain no rate-log output.
 // Independent budget: normal playback must not consume rate diagnostics.
 // At most 512 lines/process; the existing 16 MiB rotating log still applies.
 void TraceRate(const char* format, ...) {
+#if defined(STARBOARD_BUILD_TYPE_DEVEL)
   static std::atomic<unsigned> count{0};
   unsigned value = count.load();
   do {
@@ -91,6 +93,9 @@ void TraceRate(const char* format, ...) {
   std::fprintf(stderr, "[YTAF rate monotonic_us=%lld] %s\n",
                static_cast<long long>(SbTimeGetMonotonicNow()), message);
   std::fflush(stderr);
+#else
+  (void)format;
+#endif
 }
 
 bool RateReplayEnabled() {

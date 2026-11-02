@@ -202,3 +202,35 @@ with tempfile.TemporaryDirectory(prefix='ytaf-rate-') as temp:
                     '-I'+str(repo/'cobalt-platform/webos/arm'), str(root/'test.cc'),
                     '-o', str(root/'test')], check=True)
     subprocess.run([str(root/'test')], check=True)
+
+# Compile the real logging function for each Cobalt build type. The transition
+# tests above intentionally silence logs; this independently checks the gate.
+logging_fixture = r'''
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+long long SbTimeGetMonotonicNow() { return 123; }
+TRACE_RATE
+int main() {
+  for (int i = 0; i < 513; ++i) TraceRate("probe=%d", i);
+}
+'''.replace('TRACE_RATE', method('void TraceRate('))
+with tempfile.TemporaryDirectory(prefix='ytaf-rate-log-') as temp:
+    root = Path(temp)
+    (root / 'test.cc').write_text(logging_fixture)
+    for build_type in ('DEVEL', 'GOLD', 'QA', 'DEBUG'):
+        binary = root / build_type
+        subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++14',
+                        '-Wall', '-Wextra', '-Werror',
+                        '-DSTARBOARD_BUILD_TYPE_' + build_type,
+                        str(root / 'test.cc'), '-o', str(binary)], check=True)
+        result = subprocess.run([str(binary)], capture_output=True, text=True, check=True)
+        assert not result.stdout
+        lines = result.stderr.splitlines()
+        if build_type == 'DEVEL':
+            assert len(lines) == 512
+            assert lines[0] == '[YTAF rate monotonic_us=123] probe=0'
+            assert lines[-1] == '[YTAF rate monotonic_us=123] probe=511'
+        else:
+            assert not lines, (build_type, result.stderr)
+print('Rate diagnostics: Devel enabled and bounded; Gold/QA/Debug silent')

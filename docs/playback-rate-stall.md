@@ -160,7 +160,12 @@ marker (or write `1`) and relaunch to test replay. The environment variable take
 precedence. This switch affects only the replay experiment; existing shared A/V
 selection is unchanged. It was not changed on the TV during implementation.
 
-`[YTAF rate monotonic_us=...]` logs have their own 512-line process budget, separate
+`[YTAF rate monotonic_us=...]` logs are compiled only when
+`STARBOARD_BUILD_TYPE_DEVEL` is defined. Gold, QA and Debug builds emit none of
+these rate diagnostics; the replay fix remains active in all build types.
+Existing general Cobalt/shared A/V logs are unaffected.
+
+In Devel, rate logs have their own 512-line process budget, separate
 from ordinary playback tracing; they remain inside the existing bounded Cobalt
 log. Restart the app for a fresh diagnostic budget. Logs include:
 
