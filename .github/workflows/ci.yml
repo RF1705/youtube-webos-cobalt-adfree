@@ -99,6 +99,13 @@ jobs:
       - name: Test AAC packaging and artifact retention
         run: python3 scripts/test-bundled-aac-package.py
 
+  stable-manifest-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test stable Homebrew manifest updater
+        run: python3 scripts/test-stable-manifest.py
+
   smoke-test:
     runs-on: ubuntu-latest
 
