@@ -1,0 +1,45 @@
+name: Sync Homebrew stable manifest
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag (e.g. v2.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: homebrew-stable-manifest
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: ${{ (github.event_name == 'release' && !github.event.release.prerelease && !github.event.release.draft) || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          persist-credentials: true
+      - name: Sync stable manifest from release asset metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: python3 scripts/sync-stable-manifest.py --tag "$RELEASE_TAG"
+      - name: Commit stable manifest update
+        run: |
+          if git diff --quiet -- repo.json; then
+            echo "Stable manifest already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add repo.json
+          git commit -m "chore(homebrew): sync stable release manifest"
+          git push origin HEAD:main

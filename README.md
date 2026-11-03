@@ -6,6 +6,8 @@
 
 Unofficial Cobalt-based YouTube modification for LG webOS TVs with ad blocking and SponsorBlock support.
 
+The **v2.0.0 stable release** introduces the starterless Cobalt 2.x architecture. Read the [v2.0.0 release notes](docs/release-v2.0.0.md) for details.
+
 > This project is unofficial and is not affiliated with YouTube, Google, LG or webOS.
 
 ![YouTube webOS Cobalt AdFree settings](docs/images/settings.webp)
@@ -22,6 +24,9 @@ Unofficial Cobalt-based YouTube modification for LG webOS TVs with ad blocking a
 - Playback speed support
 - Optional Shorts visibility
 - Optional autostart integration
+- Native starterless Cobalt runtime without the legacy LG Cobalt starter binary
+- LG Magic Remote scroll wheel integration
+- Improved webOS launch/DIAL handling and bundled AAC decoder for livestreams
 - Installable `.ipk` package
 
 The configuration screen can be opened with the **GREEN** button on the LG remote.
@@ -29,7 +34,9 @@ While a video is playing, press **1** to decrease playback speed or **3** to inc
 
 ## Installation
 
-Download the current `.ipk` from the GitHub releases page and install it using Homebrew Channel, webOS Device Manager, `ares-cli`, or the webOS app install service on rooted devices.
+Download the stable `.ipk` from the [GitHub releases page](https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/latest) and install it using Homebrew Channel, webOS Device Manager, `ares-cli`, or the webOS app install service on rooted devices.
+
+For **v2.0.0**, the package filename is `youtube.leanback.v4_2.0.0_arm.ipk`. It will become available once the stable release is published.
 
 The package uses the original `youtube.leanback.v4` application id to preserve YouTube sign-in and phone pairing compatibility. Installing it replaces the official YouTube application.
 
@@ -41,7 +48,7 @@ Add the following custom repository in Homebrew Channel:
 https://raw.githubusercontent.com/RF1705/youtube-webos-cobalt-adfree/main/repo.json
 ```
 
-Do not install this package alongside another Homebrew package using the same `youtube.leanback.v4` application id.
+The stable Homebrew Channel entry is automatically synchronized when a new stable release is published. Do not install this package alongside another Homebrew package using the same `youtube.leanback.v4` application id.
 
 ## Building
 
