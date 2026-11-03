@@ -1,0 +1,96 @@
+name: Upload stable release manifest
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag (for example v2.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stable-release-manifest-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  manifest:
+    if: ${{ (github.event_name == 'release' && !github.event.release.prerelease && !github.event.release.draft) || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate published release and generate standalone manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Expected stable version tag vMAJOR.MINOR.PATCH" >&2
+            exit 2
+          }
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          python3 - "$RUNNER_TEMP/release.json" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          release = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          tag = release["tag_name"]
+          if release.get("draft") or release.get("prerelease") or not release.get("published_at"):
+              raise SystemExit("Release must be published and non-prerelease")
+          match = re.fullmatch(r"v(\d+\.\d+\.\d+)", tag)
+          if not match:
+              raise SystemExit("Invalid stable tag")
+          version = match.group(1)
+          package_name = f"youtube.leanback.v4_{version}_arm.ipk"
+          assets = [a for a in release.get("assets", []) if a["name"] == package_name]
+          if len(assets) != 1:
+              raise SystemExit(f"Expected exactly one {package_name} release asset")
+          asset = assets[0]
+          digest = asset.get("digest") or ""
+          if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+              raise SystemExit("Release IPK is missing a valid SHA-256 digest")
+          if not isinstance(asset.get("size"), int) or asset["size"] <= 0:
+              raise SystemExit("Invalid IPK file size")
+          repo = "RF1705/youtube-webos-cobalt-adfree"
+          expected_url = f"https://github.com/{repo}/releases/download/{tag}/{package_name}"
+          if asset.get("browser_download_url") != expected_url:
+              raise SystemExit("Unexpected IPK asset URL")
+          manifest = {
+              "id": "youtube.leanback.v4",
+              "version": version,
+              "type": "native",
+              "title": "YouTube Cobalt AdFree",
+              "iconUri": f"https://raw.githubusercontent.com/{repo}/main/assets/largeIcon.png",
+              "sourceUrl": f"https://github.com/{repo}",
+              "rootRequired": False,
+              "ipkUrl": package_name,
+              "ipkHash": {"sha256": digest.removeprefix("sha256:")},
+          }
+          Path("youtube.leanback.v4.manifest.json").write_text(
+              json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+          )
+          print(f"Generated manifest for {package_name}")
+          PY
+
+      - name: Upload manifest to GitHub release (if missing)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+              --jq '.assets[].name' | grep -Fxq 'youtube.leanback.v4.manifest.json'; then
+            echo "Manifest already exists; preserving release asset."
+            exit 0
+          fi
+          gh release upload "$RELEASE_TAG" youtube.leanback.v4.manifest.json \
+            --repo "$GITHUB_REPOSITORY"
+          echo "Uploaded youtube.leanback.v4.manifest.json to $RELEASE_TAG"
