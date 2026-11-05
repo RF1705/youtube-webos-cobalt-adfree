@@ -2,6 +2,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <vector>
 
 #include "starfish_av_session_state.h"
 #include "starfish_audio_timing.h"
@@ -17,7 +18,12 @@ template class starboard::shared::webos::StarfishAvSessionState<
 #endif
 
 using starboard::shared::webos::PlanStarfishOpusSession;
+using starboard::shared::webos::PlanStarfishSeekSnap;
 using starboard::shared::webos::StarfishAvSessionState;
+using starboard::shared::webos::StarfishSeekRetarget;
+using starboard::shared::webos::StarfishSeekRetargetResult;
+using starboard::shared::webos::StarfishSeekSnapCandidate;
+using starboard::shared::webos::StarfishSeekSnapDecision;
 using starboard::shared::webos::StarfishOpusConfig;
 using starboard::shared::webos::StarfishOpusSessionPlan;
 using starboard::shared::webos::StarfishVideoConfiguration;
@@ -322,6 +328,189 @@ void TestGenerationsAndOwnership() {
       {Packet(std::numeric_limits<size_t>::max()), Packet(1)}) == Enqueue::kInvalid);
 }
 
+
+State::Packet KeyPacket(int64_t pts, size_t bytes = 100) {
+  State::Packet packet = Packet(bytes, pts);
+  packet.is_key_frame = true;
+  return packet;
+}
+
+// Observed on the TV: at 1.75x a seek to 412.176992 s restarted on the video
+// keyframe at 406.406 s (5.77 s earlier). The native session presented that one
+// frame, never advanced, and Cobalt then reported a 20 s stall. The next
+// keyframe of the same stream is at 412.2118 s.
+constexpr int64_t kFarTargetUs = 412176992;
+constexpr int64_t kFarKeyframeUs = 406406000;
+constexpr int64_t kNextKeyframeUs = 412211800;
+constexpr int64_t kFrameUs = 33333;
+
+void TestSeekSnapPolicy() {
+  using Action = StarfishSeekSnapDecision::Action;
+  const int64_t window = 1000000, ahead = 5000000;
+  std::vector<StarfishSeekSnapCandidate> far{{kFarKeyframeUs, true}};
+  for (int i = 1; i < 60; ++i)
+    far.push_back({kFarKeyframeUs + i * kFrameUs, false});
+  far.push_back({kNextKeyframeUs, true});
+
+  auto decision = PlanStarfishSeekSnap(far, kFarTargetUs, window, ahead);
+  assert(decision.action == Action::kStartAtKeyframe);
+  assert(decision.keyframe_us == kNextKeyframeUs && decision.discard_count == 60);
+
+  // A keyframe already near the target keeps the existing start point.
+  const std::vector<StarfishSeekSnapCandidate> near{{412211800, true},
+                                                    {412245166, false}};
+  decision = PlanStarfishSeekSnap(near, 412455008, window, ahead);
+  assert(decision.action == Action::kFeedFromFront);
+  // Just after the target is inside the window as well.
+  const std::vector<StarfishSeekSnapCandidate> after{{412489333, true}};
+  decision = PlanStarfishSeekSnap(after, 412455008, window, ahead);
+  assert(decision.action == Action::kFeedFromFront);
+  // A keyframe slightly before the target is inside the window.
+  const std::vector<StarfishSeekSnapCandidate> before{{kFarKeyframeUs, true},
+                                                     {412000000, true}};
+  decision = PlanStarfishSeekSnap(before, kFarTargetUs, window, ahead);
+  assert(decision.action == Action::kStartAtKeyframe &&
+         decision.keyframe_us == 412000000);
+
+  // Still inside the too-early GOP: keep scanning, release nothing yet.
+  std::vector<StarfishSeekSnapCandidate> partial{{kFarKeyframeUs, true}};
+  for (int i = 1; i < 10; ++i) partial.push_back({kFarKeyframeUs + i * kFrameUs, false});
+  decision = PlanStarfishSeekSnap(partial, kFarTargetUs, window, ahead);
+  assert(decision.action == Action::kKeepScanning);
+
+  // A keyframe past the forward bound is not a start candidate.
+  const std::vector<StarfishSeekSnapCandidate> too_far{{kFarKeyframeUs, true},
+                                                       {kFarTargetUs + 6 * 1000000, true}};
+  decision = PlanStarfishSeekSnap(too_far, kFarTargetUs, window, ahead);
+  assert(decision.action == Action::kKeepScanning);
+
+  decision = PlanStarfishSeekSnap({}, kFarTargetUs, window, ahead);
+  assert(decision.action == Action::kWait);
+}
+
+void TestPeekAndDiscard() {
+  State state({4, 1000}, {4, 1000});
+  const auto generation = state.generation();
+  assert(state.Peek(video, 4).empty());
+  assert(state.Enqueue(generation, video,
+      {KeyPacket(1000), Packet(100, 2000), Packet(100, 3000)}) == Enqueue::kAccepted);
+  auto pending = state.Peek(video, 8);
+  assert(pending.size() == 3);
+  assert(pending[0].is_key_frame && !pending[1].is_key_frame);
+  assert(pending[0].pts_us == 1000 && pending[2].pts_us == 3000);
+  assert(state.Peek(video, 2).size() == 2);
+
+  // Releasing a middle packet keeps feed order and byte accounting intact.
+  assert(state.Discard(generation, video, pending[1].sequence));
+  assert(!state.Discard(generation, video, pending[1].sequence));
+  assert(state.queued_packets(video) == 2 && state.queued_bytes(video) == 200);
+  State::FeedTicket ticket{};
+  assert(state.NextFeed(video, &ticket) && ticket.packet.pts_us == 1000);
+  assert(state.CompleteFeed(ticket, Feed::kAccepted));
+  assert(state.NextFeed(video, &ticket) && ticket.packet.pts_us == 3000);
+  assert(!state.Discard(generation + 7, video, ticket.sequence));
+  assert(state.Discard(generation, video, ticket.sequence));
+  assert(state.queued_packets(video) == 0 && state.queued_bytes(video) == 0);
+  assert(state.Reset());
+  assert(!state.Discard(state.generation(), video, ticket.sequence));
+}
+
+void TestSeekRetarget() {
+  using Action = StarfishSeekRetargetResult::Action;
+  const size_t kHold = starboard::shared::webos::kStarfishSeekHoldPackets;
+  State state({256, 1 << 20}, {kHold, 32 << 20});
+  StarfishSeekRetarget<State> retarget;
+  retarget.Begin(kFarTargetUs, 0);
+  const auto generation = state.generation();
+
+  // No input yet: wait, and the deadline must not start before the first GOP.
+  assert(retarget.Step(&state, generation, 10000000).action == Action::kWait);
+  assert(!retarget.stats().given_up);
+
+  // The demuxer delivers audio at the seek target and video from the earlier
+  // keyframe, interleaved, as the TV trace shows. Audio only extends a few
+  // hundred milliseconds beyond the target; video must walk 5.8 s of GOP.
+  int64_t audio_pts = 412074500;
+  int64_t video_pts = kFarKeyframeUs;
+  bool started = false;
+  for (int i = 0; i < 400 && !started; ++i) {
+    if (audio_pts < kFarTargetUs + 300000) {
+      assert(state.Enqueue(generation, audio,
+          {Packet(100, audio_pts)}) == Enqueue::kAccepted);
+      audio_pts += 20000;
+    }
+    // The GOP boundary is not on this stream's 33.33 ms frame grid.
+    const bool key = video_pts == kFarKeyframeUs || video_pts >= kNextKeyframeUs;
+    const int64_t pts = key && video_pts != kFarKeyframeUs ? kNextKeyframeUs : video_pts;
+    assert(state.Enqueue(generation, video,
+        {key ? KeyPacket(pts, 100) : Packet(100, pts)}) == Enqueue::kAccepted);
+    video_pts += kFrameUs;
+    const auto result = retarget.Step(&state, generation, 1000000 + i * 10000);
+    if (result.action == Action::kWait) {
+      // Nothing is released while scanning, so an abandoned retarget cannot
+      // leave a hole in the stream the demuxer delivered.
+      assert(state.queued_packets(video) == static_cast<size_t>(i) + 1);
+    }
+    if (result.action == Action::kStart) {
+      assert(result.keyframe_us == kNextKeyframeUs);
+      started = true;
+    } else {
+      assert(result.action == Action::kWait);
+    }
+  }
+  assert(started);
+  assert(retarget.stats().video_packets > 100);
+  assert(retarget.stats().keyframe_us == kNextKeyframeUs);
+  // The session starts 100 ms after the snapped keyframe, still within the
+  // published seek tolerance of the requested target.
+  assert(retarget.start_us() == kNextKeyframeUs + 100000);
+  assert(retarget.start_us() - kFarTargetUs <= 1000000);
+  const auto front = state.Peek(video, 1);
+  assert(!front.empty() && front.front().is_key_frame &&
+         front.front().pts_us == kNextKeyframeUs);
+  const auto audio_front = state.Peek(audio, 1);
+  assert(!audio_front.empty());
+  assert(audio_front.front().pts_us >= kNextKeyframeUs - 100000);
+  // The snapped start, audio and video times plan a valid Opus restart: the
+  // pre-skip plan discards the 197.3 ms between retained audio and the start.
+  const long long gap_us = retarget.start_us() - audio_front.front().pts_us;
+  const unsigned gap_samples =
+      static_cast<unsigned>((gap_us * 48 + 500) / 1000);
+  StarfishOpusSessionPlan plan;
+  assert(PlanStarfishOpusSession(Config(), audio_front.front().pts_us,
+                                kNextKeyframeUs, retarget.start_us(), false,
+                                &plan));
+  assert(plan.discard_samples == gap_samples && gap_samples > 4000);
+
+  // A demuxer restart close to the target needs no retarget at all.
+  StarfishSeekRetarget<State> direct;
+  direct.Begin(412455008, 0);
+  State near({256, 1 << 20}, {kHold, 32 << 20});
+  assert(near.Enqueue(near.generation(), audio, {Packet(100, 412354500)}) ==
+         Enqueue::kAccepted);
+  assert(near.Enqueue(near.generation(), video, {KeyPacket(412211800)}) ==
+         Enqueue::kAccepted);
+  assert(direct.Step(&near, near.generation(), 1000).action == Action::kDirect);
+  assert(near.queued_packets(video) == 1 && near.queued_packets(audio) == 1);
+
+  // Without a usable keyframe the retarget gives up at the deadline without
+  // releasing anything, so the existing path sees the untouched stream.
+  StarfishSeekRetarget<State> stuck;
+  stuck.Begin(kFarTargetUs, 0);
+  State long_gop({256, 1 << 20}, {kHold, 32 << 20});
+  assert(long_gop.Enqueue(long_gop.generation(), video, {KeyPacket(kFarKeyframeUs)}) ==
+         Enqueue::kAccepted);
+  for (int i = 1; i < 60; ++i)
+    assert(long_gop.Enqueue(long_gop.generation(), video,
+        {Packet(100, kFarKeyframeUs + i * kFrameUs)}) == Enqueue::kAccepted);
+  auto result = stuck.Step(&long_gop, long_gop.generation(), 1000);
+  assert(result.action == Action::kWait);
+  assert(long_gop.queued_packets(video) == 60);  // held, nothing released
+  result = stuck.Step(&long_gop, long_gop.generation(), 3000000);
+  assert(result.action == Action::kGiveUp && stuck.stats().given_up);
+  assert(!stuck.active());
+}
+
 }  // namespace
 
 int main() {
@@ -332,5 +521,8 @@ int main() {
   TestVideoConfigurationTransitions();
   TestQueues();
   TestGenerationsAndOwnership();
+  TestSeekSnapPolicy();
+  TestPeekAndDiscard();
+  TestSeekRetarget();
   std::cout << "Shared Starfish A/V timing and session-state tests passed\n";
 }

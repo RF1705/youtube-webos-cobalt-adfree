@@ -102,6 +102,58 @@ inline bool PlanStarfishOpusSession(
   return true;
 }
 
+// The native shared session only advances when the first video frame it decodes
+// is close to its ptsToDecode target. A demuxer seek restarts at the keyframe at
+// or before the target, which can be seconds earlier; such a session presents
+// one frame and then stalls. Retarget such a seek to the first keyframe inside
+// the window, so Load/ptsToDecode and the first native video frame are near the
+// target like the seeks that already work.
+//
+// Packets are player-owned once Write() returned, so the retarget releases them
+// from the bridge queue in feed order and never feeds a partial GOP afterwards.
+struct StarfishSeekSnapCandidate {
+  int64_t pts_us;
+  bool is_key_frame;
+};
+
+struct StarfishSeekSnapDecision {
+  enum class Action {
+    kWait,            // no queued video yet
+    kFeedFromFront,   // front keyframe is already within the window
+    kKeepScanning,    // the demuxer has not queued a usable keyframe yet
+    kStartAtKeyframe  // release |discard_count| leading packets; start there
+  };
+  Action action = Action::kWait;
+  size_t discard_count = 0;
+  int64_t keyframe_us = 0;
+};
+
+// |window_us| accepts a keyframe slightly before or after the target.
+// |max_ahead_us| bounds how far forward a keyframe may be when none lies in the
+// window: starting later is still better than a stalled native session, but the
+// caller's abandon deadline keeps an unusable stream from being skipped forever.
+inline StarfishSeekSnapDecision PlanStarfishSeekSnap(
+    const std::vector<StarfishSeekSnapCandidate>& video, int64_t target_us,
+    int64_t window_us, int64_t max_ahead_us) {
+  StarfishSeekSnapDecision decision;
+  if (video.empty() || target_us < 0) return decision;
+  if (video.front().pts_us >= target_us - window_us) {
+    decision.action = StarfishSeekSnapDecision::Action::kFeedFromFront;
+    return decision;
+  }
+  for (size_t i = 1; i < video.size(); ++i) {
+    if (!video[i].is_key_frame || video[i].pts_us < target_us - window_us)
+      continue;
+    if (video[i].pts_us > target_us + max_ahead_us) break;
+    decision.action = StarfishSeekSnapDecision::Action::kStartAtKeyframe;
+    decision.discard_count = i;
+    decision.keyframe_us = video[i].pts_us;
+    return decision;
+  }
+  decision.action = StarfishSeekSnapDecision::Action::kKeepScanning;
+  return decision;
+}
+
 // Serialized owner-thread state. Native callbacks must marshal to that owner;
 // this is not a mutex or a firmware callback-lifetime solution. Handle must own
 // packet storage (e.g. scoped_refptr<InputBuffer>), not be a borrowed pointer.
@@ -120,6 +172,9 @@ class StarfishAvSessionState {
     Handle buffer;
     size_t bytes;
     int64_t pts_us;
+    // Video keyframe flag of the queued packet; audio packets stay false. Kept
+    // here so a seek retarget can inspect the queue without touching buffers.
+    bool is_key_frame = false;
   };
   struct FeedTicket {
     uint64_t generation;
@@ -202,6 +257,40 @@ class StarfishAvSessionState {
     return true;
   }
 
+  // Ordered metadata of the queued packets, for seek retargeting only. The
+  // caller must not use it as an alternative way to Feed a packet.
+  struct Pending {
+    uint64_t sequence;
+    bool is_key_frame;
+    int64_t pts_us;
+  };
+  std::vector<Pending> Peek(Stream stream, size_t limit) const {
+    const Queue& queue = Get(stream);
+    const size_t count = std::min(limit, queue.packets.size());
+    std::vector<Pending> pending;
+    pending.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+      pending.push_back(Pending{queue.packets[i].sequence,
+                                queue.packets[i].packet.is_key_frame,
+                                queue.packets[i].packet.pts_us});
+    return pending;
+  }
+
+  // Releases one queued packet without feeding it. Write() already took
+  // ownership from the player, so dropping it here cannot invalidate player
+  // state; a seek retarget uses it to skip a GOP that starts before the target.
+  bool Discard(uint64_t generation, Stream stream, uint64_t sequence) {
+    if (generation != generation_ || failed_) return false;
+    Queue& queue = Get(stream);
+    for (auto it = queue.packets.begin(); it != queue.packets.end(); ++it) {
+      if (it->sequence != sequence) continue;
+      queue.bytes -= it->packet.bytes;
+      queue.packets.erase(it);
+      return true;
+    }
+    return false;
+  }
+
   bool WriteEos(uint64_t generation, Stream stream) {
     if (generation != generation_ || failed_) return false;
     Get(stream).eos = true;
@@ -250,6 +339,132 @@ class StarfishAvSessionState {
   bool failed_ = false;
   bool eos_submitted_ = false;
   bool ended_ = false;
+};
+
+// Bounds of the seek retarget below. Separate from the native player so the
+// deadline and windows are explicit.
+constexpr int64_t kStarfishSeekSnapWindowUs = 1000000;
+constexpr int64_t kStarfishSeekSnapAheadUs = 5000000;
+// A streaming demuxer needs room for a whole GOP before the next keyframe is
+// queued; holding is bounded and released again on commit or abandon.
+constexpr int64_t kStarfishSeekRetargetDeadlineUs = 500000;
+constexpr int64_t kStarfishSeekSnapGuardUs = 100000;
+constexpr int64_t kStarfishSeekPrerollUs = 100000;
+constexpr size_t kStarfishSeekHoldPackets = 512;
+
+struct StarfishSeekRetargetResult {
+  enum class Action {
+    kWait,    // more queued input is required
+    kDirect,  // first keyframe is close enough: start without retargeting
+    kStart,   // start at |keyframe_us|
+    kGiveUp   // no usable keyframe: start with what the demuxer delivered
+  };
+  Action action = Action::kWait;
+  int64_t keyframe_us = 0;
+};
+
+// Turns one seek into a native-session start point near its target. The native
+// session only progresses when its first video frame is close to ptsToDecode, so
+// a GOP whose keyframe precedes the target by seconds is skipped.
+//
+// Packets are player-owned once Write() returned, so releasing them here cannot
+// invalidate player state. Nothing is released until a usable keyframe AND the
+// matching audio are queued, so an abandoned retarget leaves the stream exactly
+// as the demuxer delivered it. The caller keeps feeding Write() and calls Step()
+// from its owner thread; this object holds no packet storage.
+template <typename State>
+class StarfishSeekRetarget {
+ public:
+  using Stream = typename State::Stream;
+
+  struct Stats {
+    int64_t keyframe_us = 0;
+    unsigned video_packets = 0;
+    unsigned audio_packets = 0;
+    bool given_up = false;
+  };
+
+  void Begin(int64_t target_us, int64_t now_us) {
+    target_us_ = target_us < 0 ? 0 : target_us;
+    started_us_ = now_us;
+    active_ = true;
+    start_us_ = target_us_;
+    stats_ = Stats();
+  }
+  bool active() const { return active_; }
+  const Stats& stats() const { return stats_; }
+  int64_t start_us() const { return start_us_; }
+
+  StarfishSeekRetargetResult Step(State* state, uint64_t generation,
+                                  int64_t now_us) {
+    StarfishSeekRetargetResult result;
+    if (!active_ || !state) return result;
+    const auto video = state->Peek(Stream::kVideo, kStarfishSeekHoldPackets);
+    if (video.empty()) {
+      // Nothing has arrived yet: the deadline starts with the first GOP, not
+      // with the seek request, so a slow demuxer cannot cancel the retarget.
+      started_us_ = now_us;
+      return result;
+    }
+    std::vector<StarfishSeekSnapCandidate> candidates;
+    candidates.reserve(video.size());
+    for (const auto& entry : video)
+      candidates.push_back({entry.pts_us, entry.is_key_frame});
+    const auto decision = PlanStarfishSeekSnap(
+        candidates, target_us_, kStarfishSeekSnapWindowUs, kStarfishSeekSnapAheadUs);
+    if (decision.action == StarfishSeekSnapDecision::Action::kFeedFromFront) {
+      active_ = false;
+      result.action = StarfishSeekRetargetResult::Action::kDirect;
+      return result;
+    }
+    if (decision.action == StarfishSeekSnapDecision::Action::kStartAtKeyframe) {
+      // Commit only with the first audio packet the session would feed, so the
+      // Opus pre-skip plan matches the stream instead of a stale timestamp.
+      const int64_t preroll_us =
+          decision.keyframe_us - kStarfishSeekPrerollUs;
+      const auto audio = state->Peek(Stream::kAudio, kStarfishSeekHoldPackets);
+      size_t audio_discard = 0;
+      while (audio_discard < audio.size() &&
+             audio[audio_discard].pts_us < preroll_us)
+        ++audio_discard;
+      if (audio_discard < audio.size()) {
+        for (size_t i = 0; i < decision.discard_count; ++i)
+          if (state->Discard(generation, Stream::kVideo, video[i].sequence))
+            ++stats_.video_packets;
+        for (size_t i = 0; i < audio_discard; ++i)
+          if (state->Discard(generation, Stream::kAudio, audio[i].sequence))
+            ++stats_.audio_packets;
+        active_ = false;
+        stats_.keyframe_us = decision.keyframe_us;
+        start_us_ = StartFrom(decision.keyframe_us, audio[audio_discard].pts_us);
+        result.action = StarfishSeekRetargetResult::Action::kStart;
+        result.keyframe_us = decision.keyframe_us;
+        return result;
+      }
+    }
+    if (now_us - started_us_ >= kStarfishSeekRetargetDeadlineUs) {
+      // Nothing was released: the session starts on the demuxer's own restart
+      // keyframe, exactly as it did before retargeting existed.
+      active_ = false;
+      stats_.given_up = true;
+      result.action = StarfishSeekRetargetResult::Action::kGiveUp;
+      return result;
+    }
+    return result;
+  }
+
+ private:
+  // Native start for a snapped seek: the 100 ms guard keeps the Opus pre-skip
+  // plan inside its 80 ms..1.365 s window and the keyframe just ahead of it.
+  static int64_t StartFrom(int64_t keyframe_us, int64_t first_audio_us) {
+    int64_t start = std::max(keyframe_us, first_audio_us) + kStarfishSeekSnapGuardUs;
+    start = std::min(start, first_audio_us + 1365000);
+    return std::max(start, first_audio_us + 80000);
+  }
+
+  int64_t target_us_ = 0, started_us_ = 0, start_us_ = 0;
+  bool active_ = false;
+  Stats stats_;
 };
 
 }  // namespace webos

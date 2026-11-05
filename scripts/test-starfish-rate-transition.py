@@ -80,7 +80,7 @@ struct StarfishMediaAPIs {
   struct Fed { int64_t pts; int stream; };
   std::vector<Fed> fed;
   bool full=false, reject_rate=false;
-  int rate_calls=0, eos_calls=0;
+  int rate_calls=0, eos_calls=0, fed_before_rate=-1;
   std::string last_rate;
   std::string Feed(const char* payload) {
     if (full) return "BufferFull";
@@ -89,14 +89,16 @@ struct StarfishMediaAPIs {
     fed.push_back({std::stoll(pts + 6), std::stoi(stream + 9)});
     return "Ok";
   }
+  std::vector<std::string> calls;
   bool SetPlayRate(const char* payload) {
-    ++rate_calls; last_rate = payload;
+    calls.push_back("rate");
+    ++rate_calls; last_rate = payload; fed_before_rate = static_cast<int>(fed.size());
     if (reject_rate) return false;
     fed.clear(); // model the observed native buffer flush
     return true;
   }
-  bool Play() { return true; }
-  bool Pause() { return true; }
+  bool Play() { calls.push_back("play"); return true; }
+  bool Pause() { calls.push_back("pause"); return true; }
   bool setHdrInfo(const char*) { return true; }
   bool setVolume(const char*) { return true; }
   bool pushEOS() { ++eos_calls; return true; }
@@ -124,6 +126,7 @@ void Seed(Owner& owner, NativeSession& session) {
   session.loaded=true;
   session.video_configuration.Update(1920,1080,false,8,true);
   session.frame_ns=100000000;
+  session.frame_count.store(10);  // the session is presenting
   assert(owner.state_.Enqueue(session.generation, Stream::kAudio,
     {Packet(0), Packet(100000), Packet(200000)}) == State::EnqueueResult::kAccepted);
   assert(owner.state_.Enqueue(session.generation, Stream::kVideo,
@@ -147,20 +150,26 @@ int main() {
   assert(session.api->fed[3].stream==1 && session.api->fed[3].pts==0); // video starts at key
   owner.Step(session);
   assert(owner.state_.queued_packets(Stream::kVideo)==0 && session.api->fed.size()==7);
+  // This firmware resets the native audio decoder to 1x on Pause/Play, so a
+  // resume must re-apply the requested rate instead of trusting the old one.
   owner.rate_=0; owner.Step(session);
+  assert(!session.playing && session.rate==1);
   owner.rate_=1.25; owner.Step(session);
-  assert(session.api->rate_calls==1); // pause/resume is not a new native speed
+  assert(session.api->rate_calls==2 && session.rate==1.25);
   owner.rate_=1.5; owner.Step(session);
   owner.rate_=2; owner.Step(session); // rapid second change rebuilds the snapshot
-  assert(session.api->rate_calls==3 && session.replaying);
+  assert(session.api->rate_calls==4 && session.replaying);
   assert(session.video_replay.front().keyframe);
 
-  // Input EOS must wait until replay drains; native EOS must be resent.
+  // Input EOS must wait until replay drains; native EOS must be resent. An
+  // upward change re-arms replay on the same session, so use one here: a
+  // downward change recreates the session instead (covered separately).
   owner.state_.WriteEos(session.generation,Stream::kAudio);
   owner.state_.WriteEos(session.generation,Stream::kVideo);
   owner.Step(session);
   assert(session.api->eos_calls==1);
-  owner.rate_=1; owner.Step(session);
+  session.rate = 1;                      // model a session reloaded at 1x
+  owner.rate_=1.5; owner.Step(session);
   assert(session.replaying && session.api->eos_calls==1);
   owner.Step(session);
   assert(session.api->eos_calls==2);
@@ -170,6 +179,133 @@ int main() {
   const auto count=session.api->fed.size(); owner.Feed(session,Stream::kVideo);
   assert(session.api->fed.size()==count);
 
+  // A recreated session starts at 1x. Its rate change must wait for a
+  // replayable GOP; applying it without one can stall the native decoder.
+  Owner waiting; NativeSession ws(waiting.state_.generation());
+  ws.api.reset(new StarfishMediaAPIs);
+  ws.video_configuration.Update(1920,1080,false,8,true);
+  ws.loaded=true;
+  waiting.rate_=1.75;
+  waiting.Step(ws);
+  assert(ws.api->rate_calls==0 && ws.rate_deferred && ws.rate==1);
+  assert(waiting.state_.Enqueue(ws.generation, Stream::kAudio,
+    {Packet(0), Packet(100000), Packet(200000)}) == State::EnqueueResult::kAccepted);
+  assert(waiting.state_.Enqueue(ws.generation, Stream::kVideo,
+    {Packet(0,true), Packet(100000), Packet(200000)}) == State::EnqueueResult::kAccepted);
+  ws.frame_count.store(3);  // coverage and presentation are both required
+  waiting.Step(ws);
+  assert(ws.api->rate_calls==1 && ws.rate==1.75 && ws.replaying);
+  assert(ws.api->fed_before_rate==6 && !ws.rate_deferred);
+
+  // A rate requested while the session is still at 1x waits for the same
+  // coverage instead of applying a flushing transition to an empty pipeline.
+  Owner later; NativeSession ls(later.state_.generation());
+  ls.api.reset(new StarfishMediaAPIs);
+  ls.video_configuration.Update(1920,1080,false,8,true);
+  ls.loaded=true;
+  later.rate_=1.5;
+  later.Step(ls);
+  assert(ls.api->rate_calls==0 && ls.rate_deferred);
+  assert(later.state_.Enqueue(ls.generation, Stream::kAudio, {Packet(0)}) == State::EnqueueResult::kAccepted);
+  assert(later.state_.Enqueue(ls.generation, Stream::kVideo, {Packet(0,true)}) == State::EnqueueResult::kAccepted);
+  ls.frame_count.store(3);
+  later.Step(ls);
+  assert(ls.api->rate_calls==1 && ls.rate==1.5 && ls.replaying);
+
+  // Coverage alone is not enough: the firmware flush before the first presented
+  // frames leaves only the preroll frame and stalls (TV trace, generation 4).
+  Owner unstaged; NativeSession us(unstaged.state_.generation()); Seed(unstaged,us);
+  us.frame_count.store(0);
+  unstaged.rate_=1.75; ++now_us; unstaged.Step(us);
+  assert(us.api->rate_calls==0 && us.rate_deferred && us.rate==1);
+  us.frame_count.store(1); ++now_us; unstaged.Step(us);
+  assert(us.api->rate_calls==1 && us.rate==1.75 && us.replaying && !us.rate_deferred);
+
+  // Bounded history that never covers the GOP must not defer forever.
+  Owner timeout; NativeSession ts(timeout.state_.generation());
+  ts.api.reset(new StarfishMediaAPIs);
+  ts.video_configuration.Update(1920,1080,false,8,true);
+  ts.loaded=true;
+  timeout.rate_=1.75;
+  timeout.Step(ts);
+  assert(ts.api->rate_calls==0 && ts.rate_deferred);
+  now_us = ts.rate_deferred_at + 2 * kSecond + 1;
+  timeout.Step(ts);
+  assert(ts.api->rate_calls==1 && ts.rate==1.75 && !ts.replaying);
+
+  // A pause/resume must not be used to fake a rate change: this firmware
+  // restores the stored rate on Play, so the call has to stay a SetPlayRate.
+  replay_enabled = true;  // an earlier case disables replay
+  // Rates are sent unchanged and apply in place, upward or downward.
+  Owner forward; NativeSession fw(forward.state_.generation()); Seed(forward,fw);
+  forward.rate_ = 1.5; ++now_us; forward.Step(fw);
+  assert(fw.api->last_rate == std::string("{\"playRate\":1.5000,\"audioOutput\":true}"));
+  fw.rate = 1.5; forward.rate_ = 0.5; ++now_us; forward.Step(fw);
+  assert(fw.api->last_rate == std::string("{\"playRate\":0.5000,\"audioOutput\":true}"));
+
+  // A new rate request gets its own deferral window even after the previous
+  // request's window expired.
+  Owner renewed; NativeSession rs2(renewed.state_.generation());
+  rs2.api.reset(new StarfishMediaAPIs);
+  rs2.video_configuration.Update(1920,1080,false,8,true);
+  rs2.loaded=true;
+  renewed.rate_=1.75;
+  renewed.Step(rs2);
+  assert(rs2.rate_deferred && rs2.api->rate_calls==0);
+  now_us = rs2.rate_deferred_at + 2 * kSecond + 1;
+  renewed.rate_=1.5;
+  renewed.Step(rs2);
+  assert(rs2.rate_deferred && rs2.rate_deferred_value==1.5 && rs2.api->rate_calls==0);
+  now_us = rs2.rate_deferred_at + 2 * kSecond + 1;
+  renewed.Step(rs2);
+  assert(rs2.api->rate_calls==1 && rs2.rate==1.5);
+
+  // Withdrawn rate requests must clear the deferral timer.
+  Owner withdrawn; NativeSession ws2(withdrawn.state_.generation());
+  ws2.api.reset(new StarfishMediaAPIs);
+  ws2.video_configuration.Update(1920,1080,false,8,true);
+  ws2.loaded=true;
+  withdrawn.rate_=1.75;
+  withdrawn.Step(ws2);
+  assert(ws2.rate_deferred && ws2.rate_deferred_at!=0);
+  withdrawn.rate_=1;
+  withdrawn.Step(ws2);
+  assert(!ws2.rate_deferred && ws2.rate_deferred_at==0);
+  withdrawn.rate_=1.5;
+  withdrawn.Step(ws2);
+  assert(ws2.rate_deferred && ws2.api->rate_calls==0);
+
+  // Diagnostic mode without replay still applies the rate before the first
+  // feed, when the pipeline is empty.
+  Owner no_replay; NativeSession ns(no_replay.state_.generation());
+  ns.api.reset(new StarfishMediaAPIs);
+  ns.video_configuration.Update(1920,1080,false,8,true);
+  no_replay.rate_=1.75;
+  replay_enabled=false;
+  assert(no_replay.state_.Enqueue(ns.generation, Stream::kAudio, {Packet(0)}) == State::EnqueueResult::kAccepted);
+  assert(no_replay.state_.Enqueue(ns.generation, Stream::kVideo, {Packet(0,true)}) == State::EnqueueResult::kAccepted);
+  no_replay.Step(ns);
+  replay_enabled=true;
+  assert(ns.api->rate_calls==1 && ns.api->fed_before_rate==0 && ns.rate==1.75);
+
+  // A rejected pre-feed rate is attempted once; the post-load path retries it.
+  Owner rejected_initial; NativeSession ris(rejected_initial.state_.generation());
+  ris.api.reset(new StarfishMediaAPIs);
+  ris.video_configuration.Update(1920,1080,false,8,true);
+  ris.api->reject_rate=true;
+  rejected_initial.rate_=1.75;
+  replay_enabled=false;
+  rejected_initial.Step(ris);
+  rejected_initial.Step(ris);
+  assert(ris.api->rate_calls==1);
+  ris.api->reject_rate=false;
+  ris.loaded=true;
+  assert(rejected_initial.state_.Enqueue(ris.generation, Stream::kAudio, {Packet(0)}) == State::EnqueueResult::kAccepted);
+  assert(rejected_initial.state_.Enqueue(ris.generation, Stream::kVideo, {Packet(0,true)}) == State::EnqueueResult::kAccepted);
+  rejected_initial.Step(ris);
+  replay_enabled=true;
+  assert(ris.api->rate_calls==2 && ris.rate==1.75);
+
   Owner disabled; NativeSession ds(disabled.state_.generation()); Seed(disabled,ds);
   replay_enabled=false; disabled.rate_=1.25; disabled.Step(ds);
   assert(ds.api->rate_calls==1 && !ds.replaying && ds.video_replay.empty());
@@ -178,11 +314,24 @@ int main() {
   rs.api->reject_rate=true; rejected.rate_=1.25; rejected.Step(rs);
   assert(!rejected.error_.empty() && rs.rate==1 && !rs.replaying);
 
-  // Missing keyframe coverage leaves the old behavior observable, not a partial GOP replay.
+  // A deferred rate must not discard an active replay's queues.
+  Owner active; NativeSession as(active.state_.generation()); Seed(active,as);
+  active.rate_=1.25; active.Step(as);
+  assert(as.replaying && as.audio_replay.size()==3 && as.video_replay.size()==3);
+  as.video_history.Accept({std::make_shared<Buffer>(), 17*1024*1024, 300000}, false, 100000);
+  as.audio_history.Accept({std::make_shared<Buffer>(), 2*1024*1024, 400000}, false, 100000);
+  as.api->full=true;
+  active.rate_=1.5; active.Step(as);
+  assert(as.rate_deferred && as.replaying);
+  assert(as.audio_replay.size()==3 && as.video_replay.size()==3);
+  as.api->full=false;
+
+  // Missing keyframe coverage defers the rate rather than replaying a partial GOP.
   Owner missing; NativeSession ms(missing.state_.generation()); Seed(missing,ms);
   ms.video_history.Accept(Packet(250000, false), false, 100000);
   ms.video_history.Accept({std::make_shared<Buffer>(), 17*1024*1024, 300000}, false,100000);
   missing.rate_=1.25; missing.Step(ms);
+  assert(ms.rate_deferred && ms.api->rate_calls==0);
   assert(!ms.replaying && ms.video_replay.empty());
 
   // The five-second lookahead still bounds replay and exposes limiter hits.

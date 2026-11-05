@@ -30,6 +30,58 @@ reboot. Modes 1 and 2 respectively limit the shared backend to H.264 SDR and
 VP9/AV1 UHD SDR. They do not force YouTube's codec choice; an ineligible player
 falls back to the existing factory.
 
+## Session replacement
+
+A native session is replaced in exactly three situations, and all of them use
+one shape: the new session starts from a keyframe-anchored position and is
+primed with retained compressed packets.
+
+- **Seek**: the start is the snapped keyframe near the target (below).
+- **Rate change**: fractional rates apply in place, upward or downward, with
+  `SetPlayRate` flushing both streams but keeping the session, its clock and its
+  window.
+
+Rate changes never create a session, so they never touch the exported window.
+
+## Seek retarget
+
+A demuxer seek restarts at the video keyframe at or before the seek target,
+which can be several seconds earlier. The native session only advances when the
+first video frame it decodes is close to `ptsToDecode`: with a GOP that started
+5.7 s before the target it presented exactly one frame, never advanced, and the
+20 s stall watchdog then failed the player, so YouTube reverted playback to 1x.
+
+Every seek therefore retargets its native start to the first video keyframe
+inside a ±1 s window around the target (up to 5 s forward when the stream has no
+keyframe inside the window). The retarget holds the demuxer's restart GOP — the
+input caps are raised while it scans, because a 4K GOP is hundreds of packets —
+and commits in one step only when that keyframe and the matching audio are both
+queued. Commit releases the skipped packets from the bridge queue in feed order
+(`Write` already took ownership from the player) and starts the session on the
+keyframe; nothing is released before that, so a retarget that finds no usable
+keyframe within 500 ms gives up and leaves the stream exactly as the demuxer
+delivered it. The chosen keyframe is fed first and `ptsToDecode` is set 100 ms
+after it, so the first native video frame precedes the native target by about
+100 ms. Audio keeps at most 100 ms of pre-roll before that keyframe, which holds
+the Opus pre-skip plan inside its 80 ms–1.365 s window, and native and audio
+timestamps keep the same epoch. The app-facing current time is the snapped
+start, within the accepted seek tolerance of the requested position. A seek that
+already restarts near its target keeps the previous behavior unchanged and
+releases nothing.
+
+A recreated session that a seek snapped starts native playback at 1x until the
+rate transition is safe to issue (see `docs/playback-rate-stall.md`). The
+exported video window is armed while the retarget scans the GOP, so the ~0.5 s
+of SDL and compositor work overlaps the scan instead of delaying the first
+picture.
+
+Devel builds log one `seek-retarget` line per seek (requested target, chosen
+keyframe, native start, skipped packet counts, `given_up`) and up to four
+`seek-progress` lines after a retargeted start (native frame count and
+presented timestamp). `scripts/test-tv-seek-far-keyframe.py` drives the TV and
+asserts that a far-keyframe 1.75x seek snaps, loads, presents more than one
+frame, does not stall and keeps its rate; it exits 77 when no TV is reachable.
+
 ## Verification and limits
 
 The native session-state/timing tests, ARM/Cobalt syntax checks and a full Gold

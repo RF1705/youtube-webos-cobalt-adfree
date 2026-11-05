@@ -211,3 +211,47 @@ recovery must remain stable and must not be a replacement session at 1x.
 Also check VP9/H.264 shared sessions and high-bitrate UHD cache exhaustion. If
 `audio_covered=0` or `video_covered=0`, no replay was attempted and the trace does
 not test the candidate recovery path.
+
+## Far-keyframe seek at speed, 2026-11-04
+
+A 2.2.9 Devel trace isolated a second failure next to the rate flush: after a
+seek, the native session is created on the demuxer's restart keyframe, which can
+precede the seek target by seconds. Seeking to `412.176992` s restarted on the
+video keyframe at `406.406` s. The native session presented that frame and then
+stopped consuming video, even after the next keyframe (`412.2118` s) had been
+fed: `frames=1`, `queue_v=64`, `limit_v=2468`, audio queue drained, and the 20 s
+watchdog then failed the player and reverted playback to 1x. The same stream
+seeking to `412.455008` s restarted at `412.2118` s (244 ms before the target)
+and advanced frames continuously, so the distance between the restart keyframe
+and `ptsToDecode` is the discriminating factor, not the rate transition alone.
+
+`StarfishSeekRetarget` now retargets the native start to the first keyframe
+within ±1 s of the target (at most 5 s forward) instead of starting on a distant
+GOP: it releases the skipped packets from the bridge queue (never from the
+player), starts `ptsToDecode` 100 ms after the chosen keyframe, and keeps audio
+preroll at most 100 ms before it. The requested seek position is preserved for
+the app within the accepted tolerance. The push-then-seek 1.75x case on the TV
+is covered by `scripts/test-tv-seek-far-keyframe.py`.
+
+### Presentation gate, 2026-11-04 (second device check)
+
+The seek retarget alone was not enough. With the retarget active, a 1.75x seek
+at 195.209 s restarted on the keyframe at 195.320 s and started the native
+session at 195.420 s as intended, but the rate transition still ran before the
+recreated session had presented a frame:
+
+```
+seek-retarget snapped=1 target_us=195208992 keyframe_us=195320000 start_us=195420000
+before-rate  requested=1.75 applied=1 current_us=195420000 frames=0
+rate-cache   usable=1 audio_covered=1 video_covered=1
+after-rate   requested=1.75 applied=1.75
+first-frame  native_ns=195320000000
+seek-progress frames=1 ... (frozen until the 20 s watchdog)
+```
+
+The same log contains a successful transition on a session that was already
+presenting (`replay-drained ... frames=37`, then 37 -> 52 frames at 1.75x), so
+the flush is only safe once the new session is actually presenting. `Step()`
+therefore defers the transition until the native session has presented a frame,
+in addition to replay coverage; the existing two-second bounded fallback still
+prevents an indefinite deferral.
