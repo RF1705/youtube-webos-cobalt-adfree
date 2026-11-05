@@ -509,6 +509,10 @@ class Owner : public player::JobQueue::JobOwner {
     // keyframe is seconds earlier.
     retarget_.Begin(target, SbTimeGetMonotonicNow());
     snapped_ = false;
+    restart_pending_ = false;
+    restart_target_ = 0;
+    restart_audio_.clear();
+    restart_video_.clear();
     error_.clear(); error_sent_ = false;
     wake_.notify_one();
   }
@@ -714,18 +718,19 @@ class Owner : public player::JobQueue::JobOwner {
           stats.video_packets, stats.audio_packets, stats.given_up);
   }
 
-  // A NativeSession is created only from a keyframe-anchored start point: a seek
-  // plans it from the snapped keyframe near the target, and a player's first
-  // start uses the demuxer's own first packets. The retained exported window is
-  // handed over instead of released, so a seek does not destroy the surface.
-  // Rate changes never create a session: SetPlayRate flushes both streams but
-  // keeps the session, its clock and its window.
+  // A NativeSession is created from a keyframe-anchored start point: a seek
+  // plans it from the snapped keyframe near the target, a reload for exactly 1x
+  // restarts at the presented position from the retained GOP, and a player's
+  // first start uses the demuxer's own first packets. The retained exported
+  // window is handed over instead of released, so replacing a session does not
+  // destroy the surface. Every other rate change stays in place: SetPlayRate
+  // flushes both streams but keeps the session, its clock and its window.
   std::unique_ptr<NativeSession> Start(uint64_t generation) {
     StarfishOpusSessionPlan plan;
     SbTime target, first_audio, first_video;
     int width, height;
     unsigned bits;
-    bool hdr, snapped, prearmed;
+    bool hdr, snapped, prearmed, restart;
     {
       Guard guard(mutex_);
       if (!first_audio_ || !first_video_ || !error_.empty() ||
@@ -735,11 +740,25 @@ class Owner : public player::JobQueue::JobOwner {
       // session exists; clearing the flag earlier would orphan it whenever the
       // Opus plan below rejects the start.
       prearmed = window_prearmed_;
-      target = SessionStart();
-      first_audio = first_audio_pts_; first_video = first_video_pts_;
+      restart = !restart_audio_.empty() && !restart_video_.empty();
+      if (restart) {
+        // Reload at the presented position from the retained GOP. The plan needs
+        // 80 ms of Opus pre-roll before the target; the shift is invisible.
+        first_audio = restart_audio_.front().packet.pts_us;
+        first_video = restart_video_.front().packet.pts_us;
+        target = std::max(restart_target_, first_audio + 80000);
+        // A session whose first frame is far before its target is the shape that
+        // stalled before. Past 3 s, present from the keyframe: a short repeat is
+        // better than a frozen screen.
+        if (target - first_video > 3000000) target = first_video + 100000;
+        target = std::max(target, first_audio + 80000);
+      } else {
+        target = SessionStart();
+        first_audio = first_audio_pts_; first_video = first_video_pts_;
+      }
       width = width_; height = height_; bits = video_bits_; hdr = video_hdr_;
       if (!PlanStarfishOpusSession(config_, first_audio, first_video, target,
-                                  audio_origin_, &plan)) {
+                                  audio_origin_ && !restart, &plan)) {
         FailLocked("cannot plan shared Opus restart: timestamp/pre-roll outside supported range");
         return nullptr;
       }
@@ -748,6 +767,27 @@ class Owner : public player::JobQueue::JobOwner {
     std::unique_ptr<NativeSession> session(new NativeSession(generation));
     session->plan = plan;
     session->seek_progress = snapped;
+    session->rate = 1;  // a reloaded native session always starts at 1x
+    if (restart) {
+      session->audio_replay = std::move(restart_audio_);
+      session->video_replay = std::move(restart_video_);
+      session->replaying = true;
+      restart_target_ = 0;
+      // The reloaded session starts empty, but what it replays counts as fed or
+      // the next rate change would flush without a keyframe to replay.
+      for (const auto& entry : session->audio_replay)
+        session->audio_history.Accept(entry.packet, false, current_);
+      for (const auto& entry : session->video_replay)
+        session->video_history.Accept(entry.packet, entry.keyframe, current_);
+      Guard guard(mutex_);
+      if (state_.generation() == generation) state_.NativeFlushed();
+      session->ended.store(false);
+      Trace("rate-reloaded generation=%llu target_us=%lld audio=%lld video=%lld repeat_us=%lld",
+            static_cast<unsigned long long>(generation),
+            static_cast<long long>(target), static_cast<long long>(first_audio),
+            static_cast<long long>(first_video),
+            static_cast<long long>(target > first_video ? target - first_video : 0));
+    }
     session->video_configuration.Update(width, height, hdr, bits, true);
     session->api.reset(new StarfishMediaAPIs());
     session->window = prearmed || ApplicationSdl::Get()->AcquireExportedVideoWindow();
@@ -1101,6 +1141,35 @@ class Owner : public player::JobQueue::JobOwner {
                   session.video_history.size(), session.video_history.bytes(),
                   static_cast<long long>(session.audio_replay.empty() ? -1 : session.audio_replay.front().packet.pts_us),
                   static_cast<long long>(session.video_replay.empty() ? -1 : session.video_replay.front().packet.pts_us));
+        // Exactly 1x is the one rate this firmware cannot apply in place.
+        // StarfishMediaAPIs::SetPlayRate parses playRate as a float, range-checks
+        // -128..128 and returns true, but the pipeline treats 1.0 as the default
+        // rate and never sets the decoder's play-speed property, so playback
+        // keeps the old speed. Fractional rates, downward included, do reach the
+        // decoder. A freshly loaded session carries no rate, so reaching exactly
+        // 1x means reloading at the presented position from the retained GOP.
+        // That costs ~0.3 s of blank picture (the vendor pipeline is torn down
+        // and re-created) and is accepted here: faking it with 0.999 would leave
+        // playback 0.1 % fast for the rest of the video.
+        if (std::fabs(rate - 1) < 0.0001 &&
+            std::fabs(session.rate - 1) > 0.0001) {
+          if (RateReplayEnabled() && can_replay &&
+              !session.audio_replay.empty() && !session.video_replay.empty()) {
+            restart_pending_ = true;
+            restart_target_ = current_;
+            restart_audio_ = std::move(session.audio_replay);
+            restart_video_ = std::move(session.video_replay);
+            TraceRate("rate-reload generation=%llu from=%.6g current_us=%lld audio=%zu video=%zu",
+                      static_cast<unsigned long long>(session.generation),
+                      session.rate, static_cast<long long>(current_),
+                      restart_audio_.size(), restart_video_.size());
+            return;
+          }
+          TraceRate("rate-reload-unavailable generation=%llu from=%.6g current_us=%lld audio_covered=%d video_covered=%d",
+                    static_cast<unsigned long long>(session.generation),
+                    session.rate, static_cast<long long>(current_),
+                    audio_ok, video_ok);
+        }
         const auto payload = FormatString("{\"playRate\":%.4f,\"audioOutput\":true}", rate);
         if (!session.api->SetPlayRate(payload.c_str())) { FailSession(session, "shared rate rejected"); return; }
         session.rate = rate;
@@ -1234,7 +1303,9 @@ class Owner : public player::JobQueue::JobOwner {
         Guard guard(mutex_);
         stop = stopping_; failed = !error_.empty(); generation = state_.generation();
       }
-      if (session && (stop || failed || generation != session->generation)) {
+      if (session && (stop || failed || generation != session->generation ||
+                      restart_pending_)) {
+        restart_pending_ = false;
         if (!Close(session)) break;
       }
       if (stop) break;
@@ -1266,6 +1337,11 @@ class Owner : public player::JobQueue::JobOwner {
   // Seek retarget state (see StarfishSeekRetarget).
   StarfishSeekRetarget<State> retarget_;
   bool snapped_ = false;
+  // A request for exactly 1x reloads the native session at the presented
+  // position: that is the only way to reach 1x on this firmware.
+  bool restart_pending_ = false;
+  SbTime restart_target_ = 0;
+  std::deque<NativeSession::Replay::Entry> restart_audio_, restart_video_;
   // The exported video window is owned by the Owner while a seek pre-arms it.
   bool window_prearmed_ = false;
   bool error_sent_ = false, have_frame_ = false, bounds_dirty_ = true;

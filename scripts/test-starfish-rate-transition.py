@@ -109,6 +109,9 @@ struct Owner {
   State state_{{256, 1024*1024}, {128, 8*1024*1024}};
   SbTime current_=100000, frame_time_=0;
   bool paused_=false, video_hdr_=false, ready_=false, playing_=false, have_frame_=false;
+  bool restart_pending_=false;
+  SbTime restart_target_=0;
+  std::deque<NativeSession::Replay::Entry> restart_audio_, restart_video_;
   double rate_=1, volume_=1;
   std::string hdr_payload_, error_;
   bool Current(uint64_t g) const { return g == state_.generation() && error_.empty(); }
@@ -236,12 +239,31 @@ int main() {
   // A pause/resume must not be used to fake a rate change: this firmware
   // restores the stored rate on Play, so the call has to stay a SetPlayRate.
   replay_enabled = true;  // an earlier case disables replay
-  // Rates are sent unchanged and apply in place, upward or downward.
+  // Exactly 1x cannot be applied in place by this firmware, so the bridge
+  // reloads the session at the presented position from the retained GOP and
+  // never sends playRate 1.0.
+  replay_enabled = true;
+  Owner lower; NativeSession lw(lower.state_.generation()); Seed(lower,lw);
+  lw.rate = 1.75; lw.api->calls.clear();
+  lower.rate_ = 1; ++now_us; lower.Step(lw);
+  assert(lw.api->rate_calls == 0 && lower.restart_pending_);
+  assert(!lower.restart_video_.empty() && lower.restart_video_.front().keyframe);
+  assert(lower.restart_target_ == lower.current_);
+
+  // From below too: 0.5 -> 1 is a request for 1x and takes the same reload.
+  Owner from_below; NativeSession bw(from_below.state_.generation()); Seed(from_below,bw);
+  bw.rate = 0.5; bw.api->calls.clear();
+  from_below.rate_ = 1; ++now_us; from_below.Step(bw);
+  assert(bw.api->rate_calls == 0 && from_below.restart_pending_);
+  assert(!from_below.restart_video_.empty() && from_below.restart_video_.front().keyframe);
+
+  // Every other rate, including downward, is sent unchanged in place.
   Owner forward; NativeSession fw(forward.state_.generation()); Seed(forward,fw);
   forward.rate_ = 1.5; ++now_us; forward.Step(fw);
   assert(fw.api->last_rate == std::string("{\"playRate\":1.5000,\"audioOutput\":true}"));
   fw.rate = 1.5; forward.rate_ = 0.5; ++now_us; forward.Step(fw);
   assert(fw.api->last_rate == std::string("{\"playRate\":0.5000,\"audioOutput\":true}"));
+  assert(!forward.restart_pending_);
 
   // A new rate request gets its own deferral window even after the previous
   // request's window expired.

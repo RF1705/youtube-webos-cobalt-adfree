@@ -37,9 +37,19 @@ one shape: the new session starts from a keyframe-anchored position and is
 primed with retained compressed packets.
 
 - **Seek**: the start is the snapped keyframe near the target (below).
-- **Rate change**: fractional rates apply in place, upward or downward, with
-  `SetPlayRate` flushing both streams but keeping the session, its clock and its
-  window.
+- **Rate change**: exactly `1.0` is the one rate this firmware cannot apply in
+  place. `StarfishMediaAPIs::SetPlayRate` parses `playRate` as a float,
+  range-checks it (-128..128) and returns true, but the pipeline treats 1.0 as
+  the default rate and never sets the audio decoder's `play-speed` property, so
+  `lxadec_set_play_speed` is not called and playback keeps its speed.
+  Fractional values do reach the decoder, downward included (1.75 -> 1.5 works),
+  and the direct LS2 route is closed (a `com.webos.media/setPlayRate` on this
+  unmanaged pipeline returns `returnValue: false`). Reaching exactly 1x
+  therefore reloads the native session at the presented position from the
+  retained GOP, which starts at 1x. That costs one vendor pipeline reload
+  (~0.3 s of blank picture) per return to Normal; it is accepted over faking the
+  rate with 0.999, which would leave playback 0.1 % fast for the rest of the
+  video.
 
 Rate changes never create a session, so they never touch the exported window.
 
