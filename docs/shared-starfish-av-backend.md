@@ -32,7 +32,7 @@ falls back to the existing factory.
 
 ## Session replacement
 
-A native session is replaced in exactly three situations, and all of them use
+A native session is replaced in two situations, and both use
 one shape: the new session starts from a keyframe-anchored position and is
 primed with retained compressed packets.
 
@@ -50,8 +50,22 @@ primed with retained compressed packets.
   (~0.3 s of blank picture) per return to Normal; it is accepted over faking the
   rate with 0.999, which would leave playback 0.1 % fast for the rest of the
   video.
+  A reload requires replay coverage, a presented frame, a valid Opus pre-roll
+  plan, and a video keyframe within 1 s of the new start. If these are missing,
+  the request stays pending while the existing session continues at its applied
+  speed; the bridge retries as new packets and keyframes arrive. It never falls
+  back to sending the ineffective `playRate: 1.0`, and never rewinds video without
+  matching retained audio. Forward native presentation extends the wait, so a long GOP at a slow applied
+  speed does not turn healthy playback into a terminal error. After 5 s without
+  forward presentation, the bridge reports an explicit decode error through the
+  existing player error callback. Cobalt requires player recreation after that
+  terminal error; a seek alone cannot clear its error latch. The applied rate is unchanged on failure.
 
-Rate changes never create a session, so they never touch the exported window.
+Other rate changes stay in the existing session and keep its exported window.
+Pending reload data is published, cancelled by seeks, and consumed under the
+owner mutex. Publication rechecks both the session generation and requested rate;
+session creation transfers the retained packets into local storage before
+releasing the mutex, so a concurrent seek cannot clear storage being moved.
 
 ## Seek retarget
 
@@ -62,15 +76,22 @@ first video frame it decodes is close to `ptsToDecode`: with a GOP that started
 20 s stall watchdog then failed the player, so YouTube reverted playback to 1x.
 
 Every seek therefore retargets its native start to the first video keyframe
-inside a ±1 s window around the target (up to 5 s forward when the stream has no
-keyframe inside the window). The retarget holds the demuxer's restart GOP — the
+inside a ±1 s window around the target. Forward candidates are limited to
+900 ms so the 100 ms native-start guard fits inside that same tolerance. The
+actual snapped start, including audio pre-roll adjustments, must also remain
+within ±1 s. The retarget holds the demuxer's restart GOP — the
 input caps are raised while it scans, because a 4K GOP is hundreds of packets —
 and commits in one step only when that keyframe and the matching audio are both
 queued. Commit releases the skipped packets from the bridge queue in feed order
 (`Write` already took ownership from the player) and starts the session on the
 keyframe; nothing is released before that, so a retarget that finds no usable
-keyframe within 500 ms gives up and leaves the stream exactly as the demuxer
-delivered it. The chosen keyframe is fed first and `ptsToDecode` is set 100 ms
+keyframe within 2 s of the first video input keeps the exact requested target
+and loads the retained GOP at native 1x. No packets are released in this case.
+The rate transition stays gated until native presentation passes the target
+and accepted input has sufficient headroom. This avoids a fatal error/retry loop
+without silently skipping several seconds of content. With a snapped start,
+the chosen keyframe is fed first and
+`ptsToDecode` is set 100 ms
 after it, so the first native video frame precedes the native target by about
 100 ms. Audio keeps at most 100 ms of pre-roll before that keyframe, which holds
 the Opus pre-skip plan inside its 80 ms–1.365 s window, and native and audio
@@ -89,8 +110,38 @@ Devel builds log one `seek-retarget` line per seek (requested target, chosen
 keyframe, native start, skipped packet counts, `given_up`) and up to four
 `seek-progress` lines after a retargeted start (native frame count and
 presented timestamp). `scripts/test-tv-seek-far-keyframe.py` drives the TV and
-asserts that a far-keyframe 1.75x seek snaps, loads, presents more than one
-frame, does not stall and keeps its rate; it exits 77 when no TV is reachable.
+checks either a bounded snap or an exact-target fallback and requires sustained
+native progress at 1.75x for over 10 s; it exits 77 when no TV is reachable.
+Its native-log result still needs independent hardware-picture and audio checks.
+Use `--expected-codec H264`, `VP9`, or `AV1` to require actual codec evidence and
+`--device-label` to record the model/webOS version for each run.
+
+## Safe rate deferral and reporting
+
+Accelerated new-video startup also needs the webOS SourceBuffer configuration
+overlap patch installed by `install-webos-starboard-platform.sh`. Without it, an
+adaptive representation switch can leave Cobalt's video read pending even though
+the stream is buffered. The rate gate cannot fix missing demuxer output. See
+`docs/playback-rate-stall.md` for the root cause and the separate HD quality fix.
+
+All in-place rate transitions require replay coverage, at least two callbacks,
+presentation at least 200 ms beyond the native target, accepted video at least
+1 s ahead and audio at least 200 ms ahead. The old two-second forced transition
+has been removed. While waiting,
+the media-time provider reports the applied native rate, not the requested
+rate; pausing reports zero. A pending transition fails explicitly only after
+5 s without forward native presentation, rather than flushing unsafe input.
+Fully fed tails with established presentation keep playing at the applied rate
+and finish via native EOS even when the headroom can never be satisfied; the
+existing 20 s stall watchdog remains active. Pausing clears the active wait;
+resuming and a different rate request each get a fresh deadline. The firmware's
+pause/reset behavior remains based on the C1 trace and needs other-device checks.
+
+Disabling replay is diagnostic only: a non-default rate may be attempted before
+the first feed on an empty pipeline, but post-feed changes still require safe
+coverage. With replay disabled, the request remains pending while presentation
+advances and fails explicitly if presentation stops for 5 s outside a fully fed tail. See
+`docs/pr136-local-validation.md` for host coverage and the remaining TV matrix.
 
 ## Verification and limits
 

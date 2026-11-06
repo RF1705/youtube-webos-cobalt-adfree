@@ -226,7 +226,8 @@ and advanced frames continuously, so the distance between the restart keyframe
 and `ptsToDecode` is the discriminating factor, not the rate transition alone.
 
 `StarfishSeekRetarget` now retargets the native start to the first keyframe
-within ±1 s of the target (at most 5 s forward) instead of starting on a distant
+within ±1 s of the target (at most 900 ms forward, reserving the 100 ms native
+start guard) instead of starting on a distant
 GOP: it releases the skipped packets from the bridge queue (never from the
 player), starts `ptsToDecode` 100 ms after the chosen keyframe, and keeps audio
 preroll at most 100 ms before it. The requested seek position is preserved for
@@ -252,6 +253,65 @@ seek-progress frames=1 ... (frozen until the 20 s watchdog)
 The same log contains a successful transition on a session that was already
 presenting (`replay-drained ... frames=37`, then 37 -> 52 frames at 1.75x), so
 the flush is only safe once the new session is actually presenting. `Step()`
-therefore defers the transition until the native session has presented a frame,
-in addition to replay coverage; the existing two-second bounded fallback still
-prevents an indefinite deferral.
+therefore requires two callbacks, presentation at least 200 ms beyond the native
+target, accepted video at least 1 s ahead and audio at least 200 ms ahead,
+in addition to replay coverage. No rate request falls back to an unsafe flushing
+transition. While coverage or presentation is missing, playback continues at
+the applied rate while native presentation advances. Five seconds without
+forward presentation reports an explicit player decode error. A fully fed tail
+with established presentation instead waits for native EOS at the applied rate,
+under the existing 20 s stall watchdog, because its required headroom may never
+be available.
+The clock reports the applied rate throughout the wait and failure, with zero
+while paused. Returning to Normal requires a native reload: `playRate: 1.0`
+cannot serve as a timeout fallback. Reload planning also requires the retained
+video keyframe within 1 s of the start, preserving the presented position and
+matching audio instead of attempting a video-only rewind. A terminal rate error
+requires player recreation: clearing Owner's state alone cannot reset Cobalt's
+PlayerWorker error latch. YouTube's retry at 1x is not a successful rate change.
+
+After 2 s of video input without an acceptable keyframe/audio start, the seek
+scan preserves every queued packet and loads at the exact requested target at
+native 1x. The same presentation/headroom gate prevents a rate flush during
+distant-GOP preroll. A fatal seek error here caused YouTube to retry codecs and
+eventually fail an ordinary seek; that local approach was rejected. The exact
+fallback recovered on the C1 at 1089.031040 s with a keyframe 3.680107 s earlier.
+Both the keyframe bound and the final snapped-position tolerance are host tested.
+See `docs/pr136-local-validation.md` for coverage and device tests still needed.
+
+### Accelerated startup: overlapping adaptive configuration
+
+The rate gate was not the entire startup failure. A C1 trace showed the player
+consume an opening 4K/60 frame, then append a different configuration from PTS 0.
+Removing the old range cleared `selected_range_`. Ordinary reselection searches
+for a keyframe strictly after the last returned timestamp, so it missed the
+replacement GOP's keyframe at zero. Reads remained pending despite almost six
+seconds of buffered video. Raising the rate timeout could not supply those frames.
+
+The webOS overlay patches `SourceBufferStream::SetSelectedRangeIfNeeded`: if no
+forward keyframe exists and the buffered configuration at the last output PTS has
+changed, select that configuration's preceding keyframe. The renderer keeps its
+presentation position and discards decode preroll. This also handles old frames
+draining from `track_buffer_` after the append. Unchanged configurations retain
+their existing selection behavior.
+
+`webos_source_buffer_config_overlap_test` uses the actual Cobalt classes on ARM.
+The three changed-configuration cases fail without the patch and pass with it;
+the unchanged-configuration case passes in both builds. No diagnostic read tracing
+or legacy-backend recovery remains in the patch.
+
+### Accelerated playback quality
+
+YouTube's speed probes multiply source frame rate by speed: a 60-fps HD stream is
+queried at 105 fps for 1.75x and 120 fps for 2x. The port's blanket 60-fps check
+made Auto reject those streams and choose 480p. C1 traces showed ample bandwidth;
+returning to Normal restored Auto 4K/60.
+
+The Cobalt-only YouTube TV preload corrects these HD AV1/VP9 speed probes to their
+source frame rate before invoking the native capability check. Codec, dimensions,
+bitrate and color checks remain intact. UHD, AVC, unknown frame rates, other
+browsers and other sites are unchanged. This is a bounded client workaround,
+not an advertisement of support for arbitrary 105-fps source files. Auto quality
+and explicit user quality preferences remain under YouTube's control. The C1
+packaged-build test retained 1080p60 at 1.75x and 2x; this does not establish
+4K/60 playback above Normal speed or support on other firmware.
