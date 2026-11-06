@@ -18,6 +18,7 @@ template class starboard::shared::webos::StarfishAvSessionState<
 #endif
 
 using starboard::shared::webos::PlanStarfishOpusSession;
+using starboard::shared::webos::PlanStarfishRateRestart;
 using starboard::shared::webos::PlanStarfishSeekSnap;
 using starboard::shared::webos::StarfishAvSessionState;
 using starboard::shared::webos::StarfishSeekRetarget;
@@ -346,7 +347,7 @@ constexpr int64_t kFrameUs = 33333;
 
 void TestSeekSnapPolicy() {
   using Action = StarfishSeekSnapDecision::Action;
-  const int64_t window = 1000000, ahead = 5000000;
+  const int64_t window = 1000000, ahead = 900000;
   std::vector<StarfishSeekSnapCandidate> far{{kFarKeyframeUs, true}};
   for (int i = 1; i < 60; ++i)
     far.push_back({kFarKeyframeUs + i * kFrameUs, false});
@@ -445,7 +446,8 @@ void TestSeekRetarget() {
     assert(state.Enqueue(generation, video,
         {key ? KeyPacket(pts, 100) : Packet(100, pts)}) == Enqueue::kAccepted);
     video_pts += kFrameUs;
-    const auto result = retarget.Step(&state, generation, 1000000 + i * 10000);
+    // A buffered GOP arrives within the deadline; keep the clock monotonic.
+    const auto result = retarget.Step(&state, generation, 10000000 + i * 1000);
     if (result.action == Action::kWait) {
       // Nothing is released while scanning, so an abandoned retarget cannot
       // leave a hole in the stream the demuxer delivered.
@@ -493,8 +495,8 @@ void TestSeekRetarget() {
   assert(direct.Step(&near, near.generation(), 1000).action == Action::kDirect);
   assert(near.queued_packets(video) == 1 && near.queued_packets(audio) == 1);
 
-  // Without a usable keyframe the retarget gives up at the deadline without
-  // releasing anything, so the existing path sees the untouched stream.
+  // Without a usable keyframe expiry preserves packets for error reporting;
+  // the caller must never load the old, known-stalling GOP.
   StarfishSeekRetarget<State> stuck;
   stuck.Begin(kFarTargetUs, 0);
   State long_gop({256, 1 << 20}, {kHold, 32 << 20});
@@ -506,9 +508,81 @@ void TestSeekRetarget() {
   auto result = stuck.Step(&long_gop, long_gop.generation(), 1000);
   assert(result.action == Action::kWait);
   assert(long_gop.queued_packets(video) == 60);  // held, nothing released
-  result = stuck.Step(&long_gop, long_gop.generation(), 3000000);
+  result = stuck.Step(&long_gop, long_gop.generation(), 2000999);
+  assert(result.action == Action::kWait && stuck.active());
+  result = stuck.Step(&long_gop, long_gop.generation(), 2001000);
   assert(result.action == Action::kGiveUp && stuck.stats().given_up);
   assert(!stuck.active());
+  assert(long_gop.queued_packets(video) == 60);
+}
+
+void TestSeekRetargetBoundsAndReset() {
+  using Action = StarfishSeekRetargetResult::Action;
+  constexpr int64_t target = 10000000;
+  // Cover both a distant first packet and a tempting five-second-ahead next
+  // keyframe. Neither can bypass the tolerance through the direct-start path.
+  for (bool distant_front : {false, true}) {
+    State state({256, 1 << 20}, {512, 32 << 20});
+    StarfishSeekRetarget<State> retarget;
+    retarget.Begin(target, 0);
+    assert(state.Enqueue(state.generation(), audio, {Packet(100, target-100000)}) == Enqueue::kAccepted);
+    if (!distant_front)
+      assert(state.Enqueue(state.generation(), video, {KeyPacket(target-5000000)}) == Enqueue::kAccepted);
+    assert(state.Enqueue(state.generation(), video, {KeyPacket(target+5000000)}) == Enqueue::kAccepted);
+    const auto count = state.queued_packets(video);
+    assert(retarget.Step(&state, state.generation(), 1).action == Action::kWait);
+    assert(retarget.Step(&state, state.generation(), 2000001).action == Action::kGiveUp);
+    assert(state.queued_packets(video) == count && state.queued_packets(audio) == 1);
+  }
+  // Account for the 100 ms native-start guard: +900 ms is the latest usable
+  // keyframe, so the actual snapped position is never more than +1 second.
+  for (int64_t offset : {900000, 900001}) {
+    State state({256, 1 << 20}, {512, 32 << 20});
+    StarfishSeekRetarget<State> retarget;
+    retarget.Begin(target, 0);
+    assert(state.Enqueue(state.generation(), video,
+        {KeyPacket(target-5000000), KeyPacket(target+offset)}) == Enqueue::kAccepted);
+    assert(state.Enqueue(state.generation(), audio, {Packet(100, target+offset-100000)}) == Enqueue::kAccepted);
+    const auto result = retarget.Step(&state, state.generation(), 1);
+    if (offset == 900000) {
+      assert(result.action == Action::kStart && retarget.start_us() == target+1000000);
+    } else {
+      assert(result.action == Action::kWait && state.queued_packets(video) == 2);
+    }
+  }
+  // Late audio cannot move an otherwise valid keyframe beyond the tolerance.
+  State state({256, 1 << 20}, {512, 32 << 20});
+  StarfishSeekRetarget<State> retarget;
+  retarget.Begin(target, 0);
+  assert(state.Enqueue(state.generation(), video,
+      {KeyPacket(target-5000000), KeyPacket(target+800000)}) == Enqueue::kAccepted);
+  assert(state.Enqueue(state.generation(), audio, {Packet(100, target+950000)}) == Enqueue::kAccepted);
+  assert(retarget.Step(&state, state.generation(), 1).action == Action::kWait);
+  assert(state.queued_packets(video) == 2 && state.queued_packets(audio) == 1);
+  const auto old_generation = state.generation();
+  assert(state.Reset());
+  retarget.Begin(target+1000000, 100);
+  assert(state.Enqueue(state.generation(), video, {KeyPacket(target+900000)}) == Enqueue::kAccepted);
+  // A delayed old-generation attempt cannot commit or disable the new seek.
+  assert(retarget.Step(&state, old_generation, 101).action == Action::kWait);
+  assert(retarget.active() && state.queued_packets(video) == 1);
+  assert(retarget.Step(&state, state.generation(), 102).action == Action::kDirect);
+}
+
+void TestRateRestartPlan() {
+  StarfishOpusSessionPlan plan;
+  int64_t target = -1;
+  // Audio near the current position cannot support rewinding to an old GOP.
+  assert(!PlanStarfishRateRestart(Config(), 3900000, 0, 4000000, &target, &plan));
+  assert(target == -1);
+  assert(PlanStarfishRateRestart(Config(), 3900000, 4000000, 4000000, &target, &plan));
+  assert(target == 4000000 && plan.discard_samples == 4800);
+  // Preserve the position, advancing only enough to provide Opus pre-roll.
+  assert(PlanStarfishRateRestart(Config(), 3950000, 4000000, 4000000, &target, &plan));
+  assert(target == 4030000 && plan.discard_samples == 3840);
+  assert(!PlanStarfishRateRestart(Config(), 3900000, 4100000, 4000000, &target, &plan));
+  assert(!PlanStarfishRateRestart(Config(), std::numeric_limits<int64_t>::max(),
+                                 0, 4000000, &target, &plan));
 }
 
 }  // namespace
@@ -524,5 +598,7 @@ int main() {
   TestSeekSnapPolicy();
   TestPeekAndDiscard();
   TestSeekRetarget();
+  TestSeekRetargetBoundsAndReset();
+  TestRateRestartPlan();
   std::cout << "Shared Starfish A/V timing and session-state tests passed\n";
 }

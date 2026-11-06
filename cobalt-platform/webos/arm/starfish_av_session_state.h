@@ -129,15 +129,16 @@ struct StarfishSeekSnapDecision {
 };
 
 // |window_us| accepts a keyframe slightly before or after the target.
-// |max_ahead_us| bounds how far forward a keyframe may be when none lies in the
-// window: starting later is still better than a stalled native session, but the
-// caller's abandon deadline keeps an unusable stream from being skipped forever.
+// |max_ahead_us| reserves room for the native-start guard inside the seek
+// tolerance. A keyframe outside the window is never an acceptable fallback.
 inline StarfishSeekSnapDecision PlanStarfishSeekSnap(
     const std::vector<StarfishSeekSnapCandidate>& video, int64_t target_us,
     int64_t window_us, int64_t max_ahead_us) {
   StarfishSeekSnapDecision decision;
   if (video.empty() || target_us < 0) return decision;
-  if (video.front().pts_us >= target_us - window_us) {
+  if (video.front().is_key_frame &&
+      video.front().pts_us >= target_us - window_us &&
+      video.front().pts_us <= target_us + max_ahead_us) {
     decision.action = StarfishSeekSnapDecision::Action::kFeedFromFront;
     return decision;
   }
@@ -344,20 +345,43 @@ class StarfishAvSessionState {
 // Bounds of the seek retarget below. Separate from the native player so the
 // deadline and windows are explicit.
 constexpr int64_t kStarfishSeekSnapWindowUs = 1000000;
-constexpr int64_t kStarfishSeekSnapAheadUs = 5000000;
-// A streaming demuxer needs room for a whole GOP before the next keyframe is
-// queued; holding is bounded and released again on commit or abandon.
-constexpr int64_t kStarfishSeekRetargetDeadlineUs = 500000;
 constexpr int64_t kStarfishSeekSnapGuardUs = 100000;
+constexpr int64_t kStarfishSeekSnapAheadUs =
+    kStarfishSeekSnapWindowUs - kStarfishSeekSnapGuardUs;
+// A streaming demuxer needs room for a whole GOP before the next keyframe is
+// queued; holding is bounded. Expiry preserves the exact target and retained
+// GOP for native 1x preroll, with later rate changes still gated on progress.
+// Allow a slowly delivered GOP two seconds to arrive.
+constexpr int64_t kStarfishSeekRetargetDeadlineUs = 2000000;
 constexpr int64_t kStarfishSeekPrerollUs = 100000;
 constexpr size_t kStarfishSeekHoldPackets = 512;
+constexpr int64_t kStarfishRateTransitionDeadlineUs = 5000000;
+
+// Returning to 1x requires a fresh decoder. Keep the presented position rather
+// than rewinding video without its matching audio. A distant retained keyframe
+// is not a usable restart: wait for a new GOP while the current session plays.
+inline bool PlanStarfishRateRestart(
+    const StarfishOpusConfig& config, int64_t first_audio_us,
+    int64_t first_video_us, int64_t position_us, int64_t* restart_us,
+    StarfishOpusSessionPlan* plan) {
+  const int64_t limit = std::numeric_limits<int64_t>::max() / 1000;
+  if (!restart_us || !plan || first_audio_us > limit - 80000 ||
+      first_audio_us < -limit || position_us < 0 || position_us > limit ||
+      first_video_us < 0 || first_video_us > position_us) return false;
+  const int64_t target = std::max(position_us, first_audio_us + 80000);
+  if (target - first_video_us > kStarfishSeekSnapWindowUs ||
+      !PlanStarfishOpusSession(config, first_audio_us, first_video_us,
+                               target, false, plan)) return false;
+  *restart_us = target;
+  return true;
+}
 
 struct StarfishSeekRetargetResult {
   enum class Action {
     kWait,    // more queued input is required
     kDirect,  // first keyframe is close enough: start without retargeting
     kStart,   // start at |keyframe_us|
-    kGiveUp   // no usable keyframe: start with what the demuxer delivered
+    kGiveUp   // no nearby start: retain GOP and decode at the exact target at 1x
   };
   Action action = Action::kWait;
   int64_t keyframe_us = 0;
@@ -388,6 +412,7 @@ class StarfishSeekRetarget {
     target_us_ = target_us < 0 ? 0 : target_us;
     started_us_ = now_us;
     active_ = true;
+    have_input_ = false;
     start_us_ = target_us_;
     stats_ = Stats();
   }
@@ -398,13 +423,16 @@ class StarfishSeekRetarget {
   StarfishSeekRetargetResult Step(State* state, uint64_t generation,
                                   int64_t now_us) {
     StarfishSeekRetargetResult result;
-    if (!active_ || !state) return result;
+    if (!active_ || !state || state->generation() != generation) return result;
     const auto video = state->Peek(Stream::kVideo, kStarfishSeekHoldPackets);
     if (video.empty()) {
       // Nothing has arrived yet: the deadline starts with the first GOP, not
       // with the seek request, so a slow demuxer cannot cancel the retarget.
-      started_us_ = now_us;
       return result;
+    }
+    if (!have_input_) {
+      have_input_ = true;
+      started_us_ = now_us;
     }
     std::vector<StarfishSeekSnapCandidate> candidates;
     candidates.reserve(video.size());
@@ -427,7 +455,12 @@ class StarfishSeekRetarget {
       while (audio_discard < audio.size() &&
              audio[audio_discard].pts_us < preroll_us)
         ++audio_discard;
-      if (audio_discard < audio.size()) {
+      const int64_t start = audio_discard < audio.size()
+          ? StartFrom(decision.keyframe_us, audio[audio_discard].pts_us) : 0;
+      if (audio_discard < audio.size() &&
+          start >= target_us_ - kStarfishSeekSnapWindowUs &&
+          start <= target_us_ + kStarfishSeekSnapWindowUs &&
+          start - decision.keyframe_us <= kStarfishSeekSnapWindowUs) {
         for (size_t i = 0; i < decision.discard_count; ++i)
           if (state->Discard(generation, Stream::kVideo, video[i].sequence))
             ++stats_.video_packets;
@@ -436,15 +469,15 @@ class StarfishSeekRetarget {
             ++stats_.audio_packets;
         active_ = false;
         stats_.keyframe_us = decision.keyframe_us;
-        start_us_ = StartFrom(decision.keyframe_us, audio[audio_discard].pts_us);
+        start_us_ = start;
         result.action = StarfishSeekRetargetResult::Action::kStart;
         result.keyframe_us = decision.keyframe_us;
         return result;
       }
     }
     if (now_us - started_us_ >= kStarfishSeekRetargetDeadlineUs) {
-      // Nothing was released: the session starts on the demuxer's own restart
-      // keyframe, exactly as it did before retargeting existed.
+      // Nothing was released. The owner can decode this GOP at native 1x and
+      // keep rate changes gated until presentation advances past the target.
       active_ = false;
       stats_.given_up = true;
       result.action = StarfishSeekRetargetResult::Action::kGiveUp;
@@ -464,6 +497,7 @@ class StarfishSeekRetarget {
 
   int64_t target_us_ = 0, started_us_ = 0, start_us_ = 0;
   bool active_ = false;
+  bool have_input_ = false;
   Stats stats_;
 };
 

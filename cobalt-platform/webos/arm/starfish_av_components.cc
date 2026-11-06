@@ -266,6 +266,7 @@ struct NativeSession {
   bool rate_deferred = false;
   bool initial_rate_attempted = false;
   SbTime rate_deferred_at = 0;
+  int64_t rate_deferred_frame_ns = -1;
   double rate_deferred_value = 0;
   unsigned packet_traces = 0;
   SbTime rate_changed_at = 0, next_rate_trace = 0;
@@ -498,6 +499,7 @@ class Owner : public player::JobQueue::JobOwner {
               static_cast<unsigned long long>(state_.generation()),
               static_cast<long long>(target), rate_);
     target_ = current_ = target;
+    applied_rate_ = 1;
     input_wait_started_ = SbTimeGetMonotonicNow();
     audio_eos_ = video_eos_ = first_audio_ = first_video_ = false;
     queued_video_configuration_.Reset();
@@ -540,7 +542,8 @@ class Owner : public player::JobQueue::JobOwner {
   SbTime Time(bool* playing, bool* eos, bool* underflow, double* rate) {
     Guard guard(mutex_);
     *playing = playing_ && !paused_ && rate_ > 0 && error_.empty() && !state_.ended();
-    *eos = state_.ended(); *rate = rate_;
+    *eos = state_.ended();
+    *rate = paused_ || rate_ == 0 ? 0 : applied_rate_;
     *underflow = *playing && (!have_frame_ || SbTimeGetMonotonicNow() - frame_time_ > kSecond);
     return current_; // One native presentation position; no second audio clock.
   }
@@ -676,8 +679,9 @@ class Owner : public player::JobQueue::JobOwner {
   // native session and reports whether Start() may create the session yet.
   bool AcquireSeekStart(uint64_t generation) {  // worker thread
     Guard guard(mutex_);
-    if (!retarget_.active() || state_.generation() != generation) return true;
+    if (state_.generation() != generation) return false;
     if (!error_.empty() || stopping_) return false;
+    if (!retarget_.active()) return true;
     const auto result =
         retarget_.Step(&state_, generation, SbTimeGetMonotonicNow());
     switch (result.action) {
@@ -693,6 +697,10 @@ class Owner : public player::JobQueue::JobOwner {
         return true;
       case StarfishSeekRetargetResult::Action::kGiveUp:
         TraceRetarget(generation, false);
+        // Keep the exact target and decode the retained GOP at native 1x.
+        // The rate gate below requires presentation beyond that target and
+        // queued headroom before allowing the firmware's flushing transition.
+        // No packets were discarded by the unsuccessful retarget scan.
         return true;
       default:
         return false;
@@ -731,6 +739,7 @@ class Owner : public player::JobQueue::JobOwner {
     int width, height;
     unsigned bits;
     bool hdr, snapped, prearmed, restart;
+    std::deque<NativeSession::Replay::Entry> restart_audio, restart_video;
     {
       Guard guard(mutex_);
       if (!first_audio_ || !first_video_ || !error_.empty() ||
@@ -746,39 +755,47 @@ class Owner : public player::JobQueue::JobOwner {
         // 80 ms of Opus pre-roll before the target; the shift is invisible.
         first_audio = restart_audio_.front().packet.pts_us;
         first_video = restart_video_.front().packet.pts_us;
-        target = std::max(restart_target_, first_audio + 80000);
-        // A session whose first frame is far before its target is the shape that
-        // stalled before. Past 3 s, present from the keyframe: a short repeat is
-        // better than a frozen screen.
-        if (target - first_video > 3000000) target = first_video + 100000;
-        target = std::max(target, first_audio + 80000);
+        if (!PlanStarfishRateRestart(config_, first_audio, first_video,
+                                    restart_target_, &target, &plan)) {
+          FailLocked("invalid shared A/V rate restart");
+          return nullptr;
+        }
       } else {
         target = SessionStart();
         first_audio = first_audio_pts_; first_video = first_video_pts_;
       }
       width = width_; height = height_; bits = video_bits_; hdr = video_hdr_;
-      if (!PlanStarfishOpusSession(config_, first_audio, first_video, target,
-                                  audio_origin_ && !restart, &plan)) {
+      if (!restart && !PlanStarfishOpusSession(
+                          config_, first_audio, first_video, target,
+                          audio_origin_, &plan)) {
         FailLocked("cannot plan shared Opus restart: timestamp/pre-roll outside supported range");
         return nullptr;
       }
       current_ = target;
+      applied_rate_ = 1;
+      playing_ = have_frame_ = false;
+      // Seek cancels these queues under the same mutex. Consume the complete
+      // restart here before releasing it; all later work uses local storage.
+      if (restart) {
+        restart_audio = std::move(restart_audio_);
+        restart_video = std::move(restart_video_);
+        restart_target_ = 0;
+      }
     }
     std::unique_ptr<NativeSession> session(new NativeSession(generation));
     session->plan = plan;
     session->seek_progress = snapped;
     session->rate = 1;  // a reloaded native session always starts at 1x
     if (restart) {
-      session->audio_replay = std::move(restart_audio_);
-      session->video_replay = std::move(restart_video_);
+      session->audio_replay = std::move(restart_audio);
+      session->video_replay = std::move(restart_video);
       session->replaying = true;
-      restart_target_ = 0;
       // The reloaded session starts empty, but what it replays counts as fed or
       // the next rate change would flush without a keyframe to replay.
       for (const auto& entry : session->audio_replay)
-        session->audio_history.Accept(entry.packet, false, current_);
+        session->audio_history.Accept(entry.packet, false, target);
       for (const auto& entry : session->video_replay)
-        session->video_history.Accept(entry.packet, entry.keyframe, current_);
+        session->video_history.Accept(entry.packet, entry.keyframe, target);
       Guard guard(mutex_);
       if (state_.generation() == generation) state_.NativeFlushed();
       session->ended.store(false);
@@ -1081,95 +1098,114 @@ class Owner : public player::JobQueue::JobOwner {
       if (!session.api->setVolume(payload.c_str())) { FailSession(session, "shared volume rejected"); return; }
       session.volume = volume;
     }
-    if (loaded && rate > 0 &&
+    if (loaded && !paused && rate > 0 &&
         std::fabs(rate - session.rate) > 0.0001) {
       bool can_replay = false, audio_ok = false, video_ok = false;
+      SbTime position;
+      bool input_drained;
       std::deque<NativeSession::Replay::Entry> audio_snapshot, video_snapshot;
       {
         Guard guard(mutex_);
         if (state_.generation() != session.generation || state_.ended()) return;
-        audio_ok = session.audio_history.Snapshot(current_, &audio_snapshot);
-        video_ok = session.video_history.Snapshot(current_, &video_snapshot);
+        position = current_;
+        input_drained = audio_eos_ && video_eos_ && !session.replaying &&
+            state_.queued_packets(Stream::kAudio) == 0 &&
+            state_.queued_packets(Stream::kVideo) == 0;
+        audio_ok = session.audio_history.Snapshot(position, &audio_snapshot);
+        video_ok = session.video_history.Snapshot(position, &video_snapshot);
         can_replay = audio_ok && video_ok && RateReplayEnabled();
       }
-      const bool replay_required = RateReplayEnabled();
-      // The firmware's rate transition flushes both streams. On a recreated
-      // session that has not presented a frame yet, the flush leaves the video
-      // decoder with the preroll frame only: one frame, then no forward
-      // progress for the 20 s watchdog. Wait until the session has presented a
-      // frame before transitioning.
-      const bool presented = session.frame_count.load() >= 1;
+      const bool normal_restart = std::fabs(rate - 1) < 0.0001 &&
+                                  std::fabs(session.rate - 1) > 0.0001;
+      SbTime restart_position = 0;
+      StarfishOpusSessionPlan restart_plan;
+      const bool restart_usable = normal_restart && can_replay && PlanStarfishRateRestart(
+          config_, audio_snapshot.front().packet.pts_us,
+          video_snapshot.front().packet.pts_us, position,
+          &restart_position, &restart_plan);
+      // A preroll callback alone does not establish forward playback. Require
+      // presentation beyond the native target and enough accepted compressed
+      // data to survive the firmware's flushing transition. In particular,
+      // do not flush while a distant seek GOP is still being decoded at 1x.
+      const bool presented = session.frame_count.load() >= 2 &&
+          session.frame_ns.load() / 1000 >= session.plan.target_native_us + 200000;
+      const bool headroom = session.video_pts >= position + kSecond &&
+          session.audio_pts >= position + 200000;
       const bool new_request =
-          session.rate_deferred_at == 0 ||
+          !session.rate_deferred ||
           std::fabs(rate - session.rate_deferred_value) > 0.0001;
-      if (replay_required && (!can_replay || !presented) &&
-          (new_request || now - session.rate_deferred_at < 2 * kSecond)) {
+      if (!can_replay || !presented || !headroom || (normal_restart && !restart_usable)) {
         // A recreated session starts at 1x. Its first GOP must be replayable
         // and already presenting before the firmware's flushing rate
         // transition; otherwise the video decoder can wait for a keyframe
-        // until the 20 s watchdog fires.
-        if (new_request) {
+        // until the 20 s watchdog fires. A timeout must never force a flushing
+        // transition or mark an ineffective 1.0 command as successfully applied.
+        const int64_t frame_ns = session.frame_ns.load();
+        if (new_request || frame_ns > session.rate_deferred_frame_ns) {
+          // A distant GOP can take more than five wall-clock seconds to reach
+          // at a slow applied rate. Only lack of forward presentation expires
+          // the request; healthy playback keeps waiting for a safe restart.
           session.rate_deferred_at = now;
+          session.rate_deferred_frame_ns = frame_ns;
           session.rate_deferred_value = rate;
         }
         if (!session.rate_deferred) {
           session.rate_deferred = true;
           TraceRate("rate-deferred generation=%llu requested=%.6g current_us=%lld audio_covered=%d video_covered=%d frames=%llu",
                     static_cast<unsigned long long>(session.generation), rate,
-                    static_cast<long long>(current_), audio_ok, video_ok,
+                    static_cast<long long>(position), audio_ok, video_ok,
                     static_cast<unsigned long long>(session.frame_count.load()));
+        }
+        // A fully fed tail may never have a full second of headroom again.
+        // Preserve the old rate and let native EOS complete instead of forcing
+        // a flush or failing the video. The 20 s presentation watchdog remains.
+        if (!(input_drained && presented) &&
+            now - session.rate_deferred_at >= kStarfishRateTransitionDeadlineUs) {
+          Guard guard(mutex_);
+          if (state_.generation() != session.generation || rate_ != rate ||
+              paused_ || stopping_) return;
+          TraceEssential("rate-transition-unavailable generation=%llu requested=%.6g applied=%.6g audio_covered=%d video_covered=%d frames=%llu",
+                         static_cast<unsigned long long>(session.generation),
+                         rate, session.rate, audio_ok, video_ok,
+                         static_cast<unsigned long long>(session.frame_count.load()));
+          FailLocked("shared A/V rate transition made no presentation progress for 5 seconds; recreate player");
+          return;
         }
       } else {
-        if (replay_required && (!can_replay || !presented)) {
-          // The history never covered this GOP, or presentation never started.
-          // Fall back to the existing transition instead of leaving the rate
-          // deferred forever.
-          TraceRate("rate-deferred-timeout generation=%llu requested=%.6g current_us=%lld audio_covered=%d video_covered=%d frames=%llu",
-                    static_cast<unsigned long long>(session.generation), rate,
-                    static_cast<long long>(current_), audio_ok, video_ok,
-                    static_cast<unsigned long long>(session.frame_count.load()));
-        }
         session.rate_deferred = false;
         session.rate_deferred_at = 0;
+        session.rate_deferred_frame_ns = -1;
         session.rate_deferred_value = 0;
-        session.audio_replay = std::move(audio_snapshot);
-        session.video_replay = std::move(video_snapshot);
         RateSnapshot(session, "before-rate");
         TraceRate("rate-cache generation=%llu usable=%d enabled=%d audio_covered=%d video_covered=%d audio=%zu/%zu video=%zu/%zu first_audio=%lld first_video=%lld",
                   static_cast<unsigned long long>(session.generation), can_replay, RateReplayEnabled(), audio_ok, video_ok,
                   session.audio_history.size(), session.audio_history.bytes(),
                   session.video_history.size(), session.video_history.bytes(),
-                  static_cast<long long>(session.audio_replay.empty() ? -1 : session.audio_replay.front().packet.pts_us),
-                  static_cast<long long>(session.video_replay.empty() ? -1 : session.video_replay.front().packet.pts_us));
-        // Exactly 1x is the one rate this firmware cannot apply in place.
-        // StarfishMediaAPIs::SetPlayRate parses playRate as a float, range-checks
-        // -128..128 and returns true, but the pipeline treats 1.0 as the default
-        // rate and never sets the decoder's play-speed property, so playback
-        // keeps the old speed. Fractional rates, downward included, do reach the
-        // decoder. A freshly loaded session carries no rate, so reaching exactly
-        // 1x means reloading at the presented position from the retained GOP.
-        // That costs ~0.3 s of blank picture (the vendor pipeline is torn down
-        // and re-created) and is accepted here: faking it with 0.999 would leave
-        // playback 0.1 % fast for the rest of the video.
-        if (std::fabs(rate - 1) < 0.0001 &&
-            std::fabs(session.rate - 1) > 0.0001) {
-          if (RateReplayEnabled() && can_replay &&
-              !session.audio_replay.empty() && !session.video_replay.empty()) {
-            restart_pending_ = true;
-            restart_target_ = current_;
-            restart_audio_ = std::move(session.audio_replay);
-            restart_video_ = std::move(session.video_replay);
-            TraceRate("rate-reload generation=%llu from=%.6g current_us=%lld audio=%zu video=%zu",
-                      static_cast<unsigned long long>(session.generation),
-                      session.rate, static_cast<long long>(current_),
-                      restart_audio_.size(), restart_video_.size());
-            return;
-          }
-          TraceRate("rate-reload-unavailable generation=%llu from=%.6g current_us=%lld audio_covered=%d video_covered=%d",
+                  static_cast<long long>(audio_snapshot.empty() ? -1 : audio_snapshot.front().packet.pts_us),
+                  static_cast<long long>(video_snapshot.empty() ? -1 : video_snapshot.front().packet.pts_us));
+        // Never send the ineffective playRate 1.0, including after a timeout.
+        // Keep playback running at its old rate until a nearby GOP is usable.
+        if (normal_restart) {
+          Guard guard(mutex_);
+          if (state_.generation() != session.generation || rate_ != rate ||
+              paused_ || stopping_ || !error_.empty()) return;
+          restart_pending_ = true;
+          restart_target_ = restart_position;
+          restart_audio_ = std::move(audio_snapshot);
+          restart_video_ = std::move(video_snapshot);
+          TraceRate("rate-reload generation=%llu from=%.6g current_us=%lld audio=%zu video=%zu",
                     static_cast<unsigned long long>(session.generation),
-                    session.rate, static_cast<long long>(current_),
-                    audio_ok, video_ok);
+                    session.rate, static_cast<long long>(position),
+                    restart_audio_.size(), restart_video_.size());
+          return;
         }
+        {
+          Guard guard(mutex_);
+          if (state_.generation() != session.generation || rate_ != rate ||
+              paused_ || stopping_ || !error_.empty()) return;
+        }
+        session.audio_replay = std::move(audio_snapshot);
+        session.video_replay = std::move(video_snapshot);
         const auto payload = FormatString("{\"playRate\":%.4f,\"audioOutput\":true}", rate);
         if (!session.api->SetPlayRate(payload.c_str())) { FailSession(session, "shared rate rejected"); return; }
         session.rate = rate;
@@ -1192,6 +1228,7 @@ class Owner : public player::JobQueue::JobOwner {
       // Do not let a stale deferral timer shorten the next request.
       session.rate_deferred = false;
       session.rate_deferred_at = 0;
+      session.rate_deferred_frame_ns = -1;
       session.rate_deferred_value = 0;
     }
     if (paused && session.playing) {
@@ -1251,6 +1288,7 @@ class Owner : public player::JobQueue::JobOwner {
       Guard guard(mutex_);
       if (state_.generation() != session.generation) return;
       playing_ = session.playing;
+      applied_rate_ = session.rate;
       if (new_frame) {
         current_ = std::max(current_, frame_ns / 1000 - session.plan.epoch_us);
         have_frame_ = true; frame_time_ = now;
@@ -1298,14 +1336,15 @@ class Owner : public player::JobQueue::JobOwner {
   void Run() {
     std::unique_ptr<NativeSession> session;
     for (;;) {
-      bool stop, failed; uint64_t generation;
+      bool stop, failed, restart; uint64_t generation;
       {
         Guard guard(mutex_);
         stop = stopping_; failed = !error_.empty(); generation = state_.generation();
+        restart = restart_pending_;
+        restart_pending_ = false;
       }
       if (session && (stop || failed || generation != session->generation ||
-                      restart_pending_)) {
-        restart_pending_ = false;
+                      restart)) {
         if (!Close(session)) break;
       }
       if (stop) break;
@@ -1339,6 +1378,8 @@ class Owner : public player::JobQueue::JobOwner {
   bool snapped_ = false;
   // A request for exactly 1x reloads the native session at the presented
   // position: that is the only way to reach 1x on this firmware.
+  // All pending-restart fields are protected by mutex_; Seek cancels them,
+  // Step publishes them, and Run/Start consume them for the current generation.
   bool restart_pending_ = false;
   SbTime restart_target_ = 0;
   std::deque<NativeSession::Replay::Entry> restart_audio_, restart_video_;
@@ -1352,7 +1393,7 @@ class Owner : public player::JobQueue::JobOwner {
   // Resolution the retained exported window is currently configured with.
   int window_width_ = 0, window_height_ = 0;
   unsigned video_bits_ = 0;
-  double rate_ = 1, volume_ = 1;
+  double rate_ = 1, applied_rate_ = 1, volume_ = 1;
   std::string error_;
   std::string hdr_payload_;
   filter::ErrorCB error_cb_;

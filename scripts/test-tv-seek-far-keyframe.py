@@ -6,30 +6,26 @@ build (the `[YTAF rate ...]` diagnostics are compiled out of Gold/QA builds).
 Set YTAF_TV_CONTROL to the directory containing tv_control.py. Exits 77 when
 the TV is unreachable so CI and offline checkouts can skip it.
 
-The bug this covers: at 1.75x, a seek whose demuxer restart keyframe is seconds
-before the target made the native session present exactly one frame and then
-stall for 20 s, after which YouTube reverted playback to 1x. The fix retargets
-the seek to the next keyframe, so the checks below are the failure mode:
-
-  1. seek-retarget logged with snapped=1 and a start inside the seek tolerance,
-  2. video first-input and load for that generation,
-  3. more than one presented native frame after the seek,
-  4. no "stalled for 20 seconds" and no rate reset.
+Checks a bounded snap or exact-target 1x preroll followed by sustained native
+1.75x progress. This UI-driven smoke test does not establish binary identity,
+audible output, or hardware-picture motion; verify those independently.
 """
 import argparse
 import importlib
+import os
 import re
+import statistics
 import sys
 import time
 
 APP_ID = "youtube.leanback.v4"
 COBALT_LOG = "/tmp/cobalt-starterless.log"
-RATE_LOG = "/var/log/legacy-log"
 STALL = "presentation stalled for 20 seconds"
 
 
 def load_tv_control(path):
-    sys.path.insert(0, path)
+    if path:
+        sys.path.insert(0, path)
     return importlib.import_module("tv_control")
 
 
@@ -40,7 +36,12 @@ def fail(message):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--tv-control", default="C:/Tools/slopbro/tv-home-redesign")
+    parser.add_argument("--tv-control", default=os.environ.get("YTAF_TV_CONTROL"),
+                        help="directory containing tv_control.py (or YTAF_TV_CONTROL)")
+    parser.add_argument("--expected-codec", choices=("H264", "VP9", "AV1"),
+                        help="fail unless this shared backend is actually exercised")
+    parser.add_argument("--device-label", default="unspecified device/webOS",
+                        help="device and webOS version recorded in the test output")
     parser.add_argument("--label", default="far-keyframe")
     parser.add_argument("--settle", type=float, default=30.0,
                         help="seconds to observe after the seek")
@@ -61,17 +62,6 @@ def main():
 
     def cobalt():
         return tv.run("cat " + COBALT_LOG).decode(errors="replace")
-
-    def rates():
-        try:
-            return tv.run('grep -a "set playrate" ' + RATE_LOG).decode(
-                errors="replace")
-        except Exception:  # noqa: BLE001 - rotating legacy log may be absent
-            return ""
-
-    def last_rate():
-        found = re.findall(r"set playrate:(\d+)", rates())
-        return int(found[-1]) if found else None
 
     def show_controls():
         key("UP")            # controls, play button focused
@@ -113,8 +103,16 @@ def main():
         key("ENTER")
         time.sleep(0.5)
 
-    print("=== %s ===" % args.label, flush=True)
-    tv.run("pkill -9 -x cobalt; sleep 2")
+    print("=== %s (%s) ===" % (args.label, args.device_label), flush=True)
+    for pid in tv.run("pidof cobalt || true").decode().split():
+        if pid.isdigit():
+            try:
+                executable = tv.run("readlink /proc/" + pid + "/exe").decode()
+                if APP_ID + "/cobalt" in executable:
+                    tv.run("kill -TERM " + pid)
+            except Exception:
+                pass  # the process may already have exited
+    time.sleep(2)
     # The log survives app restarts, so measure from this launch only. A stale
     # line from an earlier run must never satisfy an assertion here.
     launched_at = len(cobalt())
@@ -133,6 +131,14 @@ def main():
     else:
         return fail("playback did not start")
 
+    codecs = re.findall(r"selected shared (H264|VP9|AV1)\+Opus backend", log())
+    if not codecs:
+        return fail("no shared-backend codec evidence")
+    print("shared codec: %s" % codecs[-1], flush=True)
+    if args.expected_codec and codecs[-1] != args.expected_codec:
+        return fail("expected %s but playback selected %s"
+                    % (args.expected_codec, codecs[-1]))
+
     at_speed = lambda: re.search(r"applied=1\.75", log()) is not None
     for _ in range(3):
         if at_speed():
@@ -140,8 +146,7 @@ def main():
         set_speed_175()
         time.sleep(2.0)
     if not at_speed():
-        return fail("could not reach 1.75x (last: %s)"
-                    % (rates().splitlines()[-1] if rates() else "none"))
+        return fail("no applied 1.75x evidence in this launch's native log")
     print("at 1.75x", flush=True)
 
     before = log()
@@ -181,14 +186,12 @@ def main():
     generation, snapped, target, keyframe, start, skipped_video, _, given_up = retarget[-1]
     generation, snapped = int(generation), int(snapped)
     target, keyframe, start = int(target), int(keyframe), int(start)
-    if int(given_up):
-        return fail("retarget gave up for generation %d" % generation)
-    if not snapped:
-        return fail("generation %d kept the distant keyframe" % generation)
-    if not 0 <= start - target <= 1000000:
+    if not snapped and (not int(given_up) or start != target):
+        return fail("far-keyframe recovery did not preserve the exact target")
+    if not -1000000 <= start - target <= 1000000:
         return fail("snapped start %d is %+d us from the target %d"
                     % (start, start - target, target))
-    if not -1000000 <= keyframe - target <= 5000000:
+    if snapped and not -1000000 <= keyframe - target <= 900000:
         return fail("chosen keyframe %d is %+d us from the target %d"
                     % (keyframe, keyframe - target, target))
     print("retarget: target=%d keyframe=%d start=%d skipped_video=%s us_off_target=%+d"
@@ -205,17 +208,31 @@ def main():
                     % (demuxer_keyframe, target))
     if not re.search(r"load generation=%d " % generation, after):
         return fail("no native Load for generation %d" % generation)
+    load_codecs = re.findall(r"load generation=%d codec=(H264|VP9|AV1) " % generation, after)
+    if len(load_codecs) != 1:
+        return fail("seek did not load exactly one native session")
+    load_targets = re.findall(r"load generation=%d [^\n]*target_us=(-?\d+)" % generation, after)
+    if load_targets != [str(start)]:
+        return fail("native Load target differs from the selected seek start")
+    if args.expected_codec and load_codecs != [args.expected_codec]:
+        return fail("seek did not load exactly one %s session (observed %s)"
+                    % (args.expected_codec, load_codecs))
 
-    frames = [int(value) for value in re.findall(
-        r"seek-progress generation=%d frames=(\d+)" % generation, after)]
-    if not frames or max(frames) < 2:
-        return fail("only %s native frames after the seek"
-                    % (max(frames) if frames else "0"))
-    print("frames after seek: %s" % max(frames), flush=True)
-
-    if last_rate() != 1750:
-        return fail("playback rate reset to %s" % last_rate())
-    print("PASS: far-keyframe seek at 1.75x recovered and kept its rate")
+    # Early callbacks and stale firmware rate logs previously produced false
+    # passes. Require sustained native progress from this seek generation.
+    samples = re.findall(
+        r"\[YTAF rate monotonic_us=(\d+)\] rate-progress generation=%d "
+        r"requested=1\.75 applied=1\.75 current_us=(\d+) frames=(\d+)" % generation, after)
+    samples = [(int(w), int(t), int(f)) for w, t, f in samples]
+    if len(samples) < 10 or samples[-1][0]-samples[0][0] < 10_000_000:
+        return fail("insufficient sustained native timing evidence at 1.75x")
+    samples = samples[3:]  # omit the flushing transition's initial settling
+    slope = statistics.linear_regression([s[0] for s in samples], [s[1] for s in samples]).slope
+    if not 1.65 <= slope <= 1.85 or samples[-1][2] <= samples[0][2]:
+        return fail("native progress disagrees with requested speed: %.4fx" % slope)
+    if re.search(r"\[YTAF shared A/V[^\n]*error:", after):
+        return fail("player reported an error during the observation")
+    print("PASS: native seek progress %.4fx; hardware-picture/audio checks remain separate" % slope)
     return 0
 
 
