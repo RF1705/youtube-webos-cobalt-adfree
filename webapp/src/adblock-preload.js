@@ -1,4 +1,5 @@
 import { configRead } from './config.js';
+import { installPlaybackSpeedCapabilities } from './playback-speed-capabilities.mjs';
 import { stripYouTubeAds, stripAdditionalYouTubeAds } from './ad-response-filter.mjs';
 import { stripSponsoredQrCodePopups } from './sponsored-qr-code-block.mjs';
 import {
@@ -6,6 +7,8 @@ import {
   isGuideResponse,
   stripShortsFromBrowseResponse
 } from './shorts-response-filter.mjs';
+
+installPlaybackSpeedCapabilities(window);
 
 if (!window.__ytafPreloadExecuted) {
   window.__ytafPreloadExecuted = true;
