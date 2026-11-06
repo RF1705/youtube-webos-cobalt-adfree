@@ -753,7 +753,8 @@ int main() {
   replay_enabled=true;
   assert(ns.api->rate_calls==1 && ns.api->fed_before_rate==0 && ns.rate==1.75);
 
-  // A rejected pre-feed rate is attempted once; the post-load path retries it.
+  // A rejected diagnostic rate is attempted once. Post-load retry requires
+  // replay to be re-enabled plus the normal presentation/coverage checks.
   Owner rejected_initial; NativeSession ris(rejected_initial.state_.generation());
   ris.api.reset(new StarfishMediaAPIs);
   ris.video_configuration.Update(1920,1080,false,8,true);
@@ -855,7 +856,8 @@ snapshot = method('  void RateSnapshot(').replace(
 fixture = (fixture.replace('\nSESSION\n', '\n' + session + '\n')
            .replace('\nFEED\n', '\n' + method('  void Feed(') + '\n')
            .replace('\nSNAPSHOT\n', '\n' + snapshot + '\n')
-           .replace('\nSTEP\n', '\n' + step + '\n'))
+           .replace('\nSTEP\n', '\n' + method('  void ApplyDiagnosticInitialRate(') + '\n' +
+                    method('  bool UpdatePlaybackRate(') + '\n' + step + '\n'))
 for marker, signature in (
     ('HDR_TRANSFER', 'bool IsHdrTransfer('),
     ('CODEC_NAME', 'const char* CodecName('),

@@ -1040,25 +1040,16 @@ class Owner : public player::JobQueue::JobOwner {
       static_cast<long long>(session.last_event_value.load()));
   }
 
-  void Step(NativeSession& session) {
-    if (session.failed.load()) {
-      FailSession(session, FormatString("shared Starfish error type=%d value=%lld", session.error_type.load(),
-                        static_cast<long long>(session.error_value.load()))); return;
-    }
-    bool paused, hdr_expected;
-    double rate, volume;
-    std::string hdr_payload;
-    {
-      Guard guard(mutex_);
-      paused = paused_ || rate_ == 0; rate = rate_; volume = volume_;
-      hdr_expected = video_hdr_; hdr_payload = hdr_payload_;
-    }
+  // Kept separate from the normal replay-backed startup path. This opt-in
+  // diagnostic preserves the empty-pipeline experiment when replay is disabled.
+  void ApplyDiagnosticInitialRate(NativeSession& session, double rate) {
     if (!RateReplayEnabled() && !session.initial_rate_attempted &&
         rate > 0 && std::fabs(rate - session.rate) > 0.0001 &&
         !session.audio_fed && !session.video_fed) {
       // Diagnostic mode without replay: apply the rate before the first feed
       // so the flushing transition runs on an empty pipeline. Do not retry a
-      // rejected call on every worker step; the post-load path will retry.
+      // rejected call on every worker step. Post-load retry still requires
+      // replay to be enabled and the usual coverage/presentation checks.
       session.initial_rate_attempted = true;
       const auto payload =
           FormatString("{\"playRate\":%.4f,\"audioOutput\":true}", rate);
@@ -1071,39 +1062,12 @@ class Owner : public player::JobQueue::JobOwner {
                   static_cast<unsigned long long>(session.generation), rate);
       }
     }
-    // Feed while initially paused too, so the worker can finish preroll without
-    // an unsolicited Play. Never Play just to obtain LOADCOMPLETED/first frame.
-    Feed(session, Stream::kAudio); Feed(session, Stream::kVideo);
-    if (session.replaying && session.audio_replay.empty() && session.video_replay.empty()) {
-      session.replaying = false;
-      RateSnapshot(session, "replay-drained");
-    }
-    if (!Current(session.generation)) return;
-    {
-      Guard guard(mutex_);
-      if (state_.generation() != session.generation) return;
-      ready_ = session.audio_fed && session.video_fed;
-    }
-    const auto now = SbTimeGetMonotonicNow();
-    const bool loaded = session.loaded.load();
-    if (loaded && !session.was_loaded)
-      Trace("load-completed generation=%llu", static_cast<unsigned long long>(session.generation));
-    if (loaded && hdr_expected && hdr_payload.empty() && !session.hdr_auto_logged) {
-      session.hdr_auto_logged = true;
-      Trace("HDR metadata unavailable generation=%llu; using elementary-stream detection",
-            static_cast<unsigned long long>(session.generation));
-    } else if (loaded && !hdr_payload.empty() &&
-               hdr_payload != session.applied_hdr_payload) {
-      const bool accepted = session.api->setHdrInfo(hdr_payload.c_str());
-      session.applied_hdr_payload = hdr_payload;
-      Trace("HDR metadata generation=%llu accepted=%d",
-            static_cast<unsigned long long>(session.generation), accepted);
-    }
-    if (loaded && volume != session.volume) {
-      const auto payload = FormatString("{\"volume\":%d}", int(std::lround(volume * 100)));
-      if (!session.api->setVolume(payload.c_str())) { FailSession(session, "shared volume rejected"); return; }
-      session.volume = volume;
-    }
+  }
+
+  // False means this worker step must stop: the session is stale, failed, or
+  // has published a reload. Preserve that boundary before Play or EOS handling.
+  bool UpdatePlaybackRate(NativeSession& session, bool loaded, bool paused,
+                          double rate, SbTime now) {
     if (loaded && !paused && rate > 0 &&
         std::fabs(rate - session.rate) > 0.0001) {
       bool can_replay = false, audio_ok = false, video_ok = false;
@@ -1112,7 +1076,7 @@ class Owner : public player::JobQueue::JobOwner {
       std::deque<NativeSession::Replay::Entry> audio_snapshot, video_snapshot;
       {
         Guard guard(mutex_);
-        if (state_.generation() != session.generation || state_.ended()) return;
+        if (state_.generation() != session.generation || state_.ended()) return false;
         position = current_;
         input_drained = audio_eos_ && video_eos_ && !session.replaying &&
             state_.queued_packets(Stream::kAudio) == 0 &&
@@ -1147,11 +1111,10 @@ class Owner : public player::JobQueue::JobOwner {
       const bool paused_start = session.initial_play_pending && !session.playing;
       if (!can_replay || ((!presented || !headroom) && !paused_start) ||
           (normal_restart && !restart_usable)) {
-        // A recreated session starts at 1x. Its first GOP must be replayable
-        // and already presenting before the firmware's flushing rate
-        // transition; otherwise the video decoder can wait for a keyframe
-        // until the 20 s watchdog fires. A timeout must never force a flushing
-        // transition or mark an ineffective 1.0 command as successfully applied.
+        // Every transition needs replay coverage. Running sessions also need
+        // forward presentation/headroom; only the initial paused setup skips
+        // that gate. A timeout must never force a flushing transition or mark
+        // an ineffective 1.0 command as successfully applied.
         const int64_t frame_ns = session.frame_ns.load();
         if (new_request || frame_ns > session.rate_deferred_frame_ns) {
           // A distant GOP can take more than five wall-clock seconds to reach
@@ -1175,13 +1138,13 @@ class Owner : public player::JobQueue::JobOwner {
             now - session.rate_deferred_at >= kStarfishRateTransitionDeadlineUs) {
           Guard guard(mutex_);
           if (state_.generation() != session.generation || rate_ != rate ||
-              paused_ || stopping_) return;
+              paused_ || stopping_) return false;
           TraceEssential("rate-transition-unavailable generation=%llu requested=%.6g applied=%.6g audio_covered=%d video_covered=%d frames=%llu",
                          static_cast<unsigned long long>(session.generation),
                          rate, session.rate, audio_ok, video_ok,
                          static_cast<unsigned long long>(session.frame_count.load()));
           FailLocked("shared A/V rate transition made no presentation progress for 5 seconds; recreate player");
-          return;
+          return false;
         }
       } else {
         session.rate_deferred = false;
@@ -1200,7 +1163,7 @@ class Owner : public player::JobQueue::JobOwner {
         if (normal_restart) {
           Guard guard(mutex_);
           if (state_.generation() != session.generation || rate_ != rate ||
-              paused_ || stopping_ || !error_.empty()) return;
+              paused_ || stopping_ || !error_.empty()) return false;
           restart_pending_ = true;
           restart_target_ = restart_position;
           restart_audio_ = std::move(audio_snapshot);
@@ -1209,17 +1172,17 @@ class Owner : public player::JobQueue::JobOwner {
                     static_cast<unsigned long long>(session.generation),
                     session.rate, static_cast<long long>(position),
                     restart_audio_.size(), restart_video_.size());
-          return;
+          return false;
         }
         {
           Guard guard(mutex_);
           if (state_.generation() != session.generation || rate_ != rate ||
-              paused_ || stopping_ || !error_.empty()) return;
+              paused_ || stopping_ || !error_.empty()) return false;
         }
         session.audio_replay = std::move(audio_snapshot);
         session.video_replay = std::move(video_snapshot);
         const auto payload = FormatString("{\"playRate\":%.4f,\"audioOutput\":true}", rate);
-        if (!session.api->SetPlayRate(payload.c_str())) { FailSession(session, "shared rate rejected"); return; }
+        if (!session.api->SetPlayRate(payload.c_str())) { FailSession(session, "shared rate rejected"); return false; }
         session.rate = rate;
         if (paused_start) {
           // Wait for accepted replay from both streams before the first Play.
@@ -1231,13 +1194,11 @@ class Owner : public player::JobQueue::JobOwner {
         session.next_rate_trace = now;
         session.rate_frame = session.frame_ns.load();
         session.packet_traces = 0;
-        session.replaying = can_replay;
-        if (can_replay) {
+        session.replaying = true;
+        {
           Guard guard(mutex_);
           if (state_.generation() == session.generation) state_.NativeFlushed();
           session.ended.store(false);
-        } else {
-          session.audio_replay.clear(); session.video_replay.clear();
         }
         RateSnapshot(session, "after-rate");
       }
@@ -1249,6 +1210,57 @@ class Owner : public player::JobQueue::JobOwner {
       session.rate_deferred_frame_ns = -1;
       session.rate_deferred_value = 0;
     }
+    return true;
+  }
+
+  void Step(NativeSession& session) {
+    if (session.failed.load()) {
+      FailSession(session, FormatString("shared Starfish error type=%d value=%lld", session.error_type.load(),
+                        static_cast<long long>(session.error_value.load()))); return;
+    }
+    bool paused, hdr_expected;
+    double rate, volume;
+    std::string hdr_payload;
+    {
+      Guard guard(mutex_);
+      paused = paused_ || rate_ == 0; rate = rate_; volume = volume_;
+      hdr_expected = video_hdr_; hdr_payload = hdr_payload_;
+    }
+    ApplyDiagnosticInitialRate(session, rate);
+    // Feed while initially paused too, so the worker can finish preroll without
+    // an unsolicited Play. Never Play just to obtain LOADCOMPLETED/first frame.
+    Feed(session, Stream::kAudio); Feed(session, Stream::kVideo);
+    if (session.replaying && session.audio_replay.empty() && session.video_replay.empty()) {
+      session.replaying = false;
+      RateSnapshot(session, "replay-drained");
+    }
+    if (!Current(session.generation)) return;
+    {
+      Guard guard(mutex_);
+      if (state_.generation() != session.generation) return;
+      ready_ = session.audio_fed && session.video_fed;
+    }
+    const auto now = SbTimeGetMonotonicNow();
+    const bool loaded = session.loaded.load();
+    if (loaded && !session.was_loaded)
+      Trace("load-completed generation=%llu", static_cast<unsigned long long>(session.generation));
+    if (loaded && hdr_expected && hdr_payload.empty() && !session.hdr_auto_logged) {
+      session.hdr_auto_logged = true;
+      Trace("HDR metadata unavailable generation=%llu; using elementary-stream detection",
+            static_cast<unsigned long long>(session.generation));
+    } else if (loaded && !hdr_payload.empty() &&
+               hdr_payload != session.applied_hdr_payload) {
+      const bool accepted = session.api->setHdrInfo(hdr_payload.c_str());
+      session.applied_hdr_payload = hdr_payload;
+      Trace("HDR metadata generation=%llu accepted=%d",
+            static_cast<unsigned long long>(session.generation), accepted);
+    }
+    if (loaded && volume != session.volume) {
+      const auto payload = FormatString("{\"volume\":%d}", int(std::lround(volume * 100)));
+      if (!session.api->setVolume(payload.c_str())) { FailSession(session, "shared volume rejected"); return; }
+      session.volume = volume;
+    }
+    if (!UpdatePlaybackRate(session, loaded, paused, rate, now)) return;
     if (session.initial_play_pending && loaded && !paused && session.audio_fed &&
         session.video_fed && std::fabs(rate - session.rate) < 0.0001)
       session.initial_play_pending = false;
