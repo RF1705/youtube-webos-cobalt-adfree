@@ -9,25 +9,25 @@ alone was not accepted as evidence. Compositor-only screenshots omit the video
 plane and were not used to establish picture progress.
 
 The latest device-tested executable was:
-`f86f1113f7d411b71451bdf77db7571a37912f99b262553280724316abec8f96`.
-The subsequent cleanup extracts methods and removes an unreachable branch.
-Its native regressions, UBSan checks, frontend tests/build and ARM build passed;
-it has not been retested on the TV. The observations below refer to the
-executable above.
+`e44491f73c875c0226a9cda57e688aa5b87307ea2da798cd50cafa51b88d3c36`.
+This is the cleanup build from commit `9e3bde5`. Its running process identity
+was verified before and after the device tests below. Native regressions, UBSan
+checks, frontend tests/build, ARM build and all six CI jobs also passed.
 
 ## Device observations
 
 - **New video at retained 1.75x:** used BACK -> list -> ENTER, starting the new
-  video at zero. The first moving picture appeared 2.016 s after ENTER. Native
-  Load-to-first-frame was 0.285 s; first native Play already used 1.75x. Settled
-  playback measured 1.7520x with changing DISPLAY captures. Client/network work
+  video at zero. The first advancing sampled state arrived at 2.532 s, with
+  picture progress confirmed in early/late DISPLAY captures. Load-to-first-frame was
+  0.280 s; first native Play already used 1.75x. Settled playback measured
+  1.7541x at 1080p with changing DISPLAY captures. Client/network work
   still contributes to navigation latency; this is not a sub-second startup claim.
 - **Reported seek:** target 2760.028160 s, first decoded audio 2759.994500 s.
   Load retained the exact target and used 1,616 discard samples. The latest
-  build measured 1.7253x within the test's 0.08 tolerance, with advancing frames.
+  build measured 1.7532x within the test's 0.08 tolerance, with advancing frames.
   The preceding exact-timing candidate measured 1.7549x over 14.57 s.
-- **Normal, pause and resume:** the latest build measured 1.0012x at Normal and
-  1.7507x after resume; pause remained stationary. Returning to Normal still
+- **Normal, pause and resume:** the latest build measured 1.0019x at Normal and
+  1.7499x after resume; pause remained stationary. Returning to Normal still
   reloads the native pipeline and can show a temporary black picture.
 - **Broader regression matrix:** an earlier candidate passed 11 observations
   covering 1.75x, 0.5x, returns to Normal from both sides, repeated seeks,
@@ -35,9 +35,14 @@ executable above.
 - **Auto quality:** the packaged capability correction retained Auto 1080p60
   at measured 1.7509x and 1.9990x. This does not establish accelerated 4K/60.
 
-The owner also manually tested the installed candidate before publication.
-Earlier matrices support regression coverage; they are not fresh runs of every
-case on the latest executable. Local raw logs, per-phase fits and captures are
+Independent native frame-timestamp fits measured 1.7490x after the seek and
+1.7435x after resume, each over 16 s with 80 further frame callbacks. Pause
+held the same position over two seconds. The cleanup build is left installed
+and paused, with the previous volume restored.
+
+The owner manually tested the preceding candidate; cleanup validation was
+remote. Earlier matrices support regression coverage; they are not fresh runs
+of every case on the latest executable. Local raw logs, per-phase fits and captures are
 retained outside the repository. Rejected prototypes and ambiguous navigation
 attempts are excluded from pass claims.
 
