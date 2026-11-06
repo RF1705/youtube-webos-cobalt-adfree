@@ -1,0 +1,176 @@
+--- a/third_party/chromium/media/filters/source_buffer_stream.cc
++++ b/third_party/chromium/media/filters/source_buffer_stream.cc
+@@ -1955,6 +1955,25 @@
+ 
+   // If we don't have buffered data to seek to, then return.
+   if (seek_timestamp == kNoTimestamp) {
++#if defined(STARBOARD_WEBOS)
++    // An adaptive config change can replace the exhausted GOP after its first
++    // frames were returned. Searching only after the last output PTS misses
++    // the replacement keyframe, leaving reads pending despite buffered data.
++    // Resume the new config from its preceding keyframe; rendering discards
++    // preroll before the current presentation time. This also runs when old
++    // frames saved in track_buffer_ drain after an overlapping append.
++    if (!video_configs_.empty() && !seek_pending_ &&
++        highest_output_buffer_timestamp_ != kNoTimestamp) {
++      auto replacement = FindExistingRangeFor(highest_output_buffer_timestamp_);
++      if (replacement != ranges_.end() &&
++          (*replacement)->CanSeekTo(highest_output_buffer_timestamp_) &&
++          (*replacement)->GetConfigIdAtTime(highest_output_buffer_timestamp_) !=
++              current_config_index_) {
++        SeekAndSetSelectedRange(replacement->get(),
++                                highest_output_buffer_timestamp_);
++      }
++    }
++#endif
+     DVLOG(2) << __func__ << " " << GetStreamTypeName()
+              << " couldn't find new selected range seek timestamp";
+     return;
+--- a/cobalt/media/BUILD.gn
++++ b/cobalt/media/BUILD.gn
+@@ -136,3 +136,16 @@
+ 
+   data_deps = [ "//cobalt/media/testing:cobalt_media_download_test_data" ]
+ }
++
++# This regression uses synthetic compressed buffers and needs no media downloads.
++target(gtest_target_type, "webos_source_buffer_config_overlap_test") {
++  testonly = true
++  sources = [
++    "//third_party/chromium/media/filters/webos_source_buffer_config_overlap_test.cc",
++  ]
++  deps = [
++    "//cobalt/test:run_all_unittests",
++    "//testing/gtest",
++    "//third_party/chromium/media:media",
++  ]
++}
+--- /dev/null
++++ b/third_party/chromium/media/filters/webos_source_buffer_config_overlap_test.cc
+@@ -0,0 +1,126 @@
++// Regression coverage for a webOS adaptive startup stall.
++#if defined(STARBOARD_WEBOS)
++#include "media/filters/source_buffer_stream.h"
++#include "media/base/media_log.h"
++#include "media/base/stream_parser_buffer.h"
++#include "media/base/timestamp_constants.h"
++#include "testing/gtest/include/gtest/gtest.h"
++#include "starboard/memory.h"
++
++namespace media {
++namespace {
++VideoDecoderConfig Config(int width, int height) {
++  gfx::Size size(width, height);
++  return VideoDecoderConfig(VideoCodec::kAV1, AV1PROFILE_PROFILE_MAIN,
++      VideoDecoderConfig::AlphaMode::kIsOpaque, VideoColorSpace(),
++      VideoTransformation(), size, gfx::Rect(size), size, {},
++      EncryptionScheme::kUnencrypted);
++}
++
++StreamParser::BufferQueue Frames(int count, int frame_us) {
++  StreamParser::BufferQueue frames;
++  const uint8_t byte = 0;
++  for (int i = 0; i < count; ++i) {
++    auto frame = StreamParserBuffer::CopyFrom(&byte, 1, i == 0,
++                                              DemuxerStream::VIDEO, 1);
++    frame->set_timestamp(base::Microseconds(i * frame_us));
++    frame->set_duration(base::Microseconds(frame_us));
++    frames.push_back(frame);
++  }
++  return frames;
++}
++
++class TestAllocator : public DecoderBuffer::Allocator {
++ public:
++  TestAllocator() { Set(this); }
++  ~TestAllocator() { Set(nullptr); }
++  void* Allocate(size_t size, size_t alignment) override {
++    return SbMemoryAllocateAligned(alignment, size);
++  }
++  void Free(void* p, size_t) override { SbMemoryDeallocateAligned(p); }
++  int GetAudioBufferBudget() const override { return 1024 * 1024; }
++  int GetBufferAlignment() const override { return 16; }
++  int GetBufferPadding() const override { return 0; }
++  SbTime GetBufferGarbageCollectionDurationThreshold() const override { return 0; }
++  int GetProgressiveBufferBudget(SbMediaVideoCodec, int, int, int) const override {
++    return 1024 * 1024;
++  }
++  int GetVideoBufferBudget(SbMediaVideoCodec, int, int, int) const override {
++    return 1024 * 1024;
++  }
++};
++
++class WebosSourceBufferConfigOverlapTest : public testing::Test {
++ protected:
++  TestAllocator allocator_;
++  MediaLog log_;
++  SourceBufferStream stream_{"video/mp4; codecs=\"av01.0.12M.08\"",
++                             Config(3840, 2160), &log_};
++
++  void ConsumeInitial(int count) {
++    stream_.Seek(base::TimeDelta());
++    stream_.OnStartOfCodedFrameGroup(base::TimeDelta());
++    stream_.Append(Frames(count, 16666));
++    scoped_refptr<StreamParserBuffer> frame;
++    for (int i = 0; i < count; ++i)
++      ASSERT_EQ(SourceBufferStreamStatus::kSuccess, stream_.GetNextBuffer(&frame));
++    ASSERT_EQ(SourceBufferStreamStatus::kNeedBuffer, stream_.GetNextBuffer(&frame));
++  }
++
++  void ReplaceAndRead(int initial_count) {
++    ConsumeInitial(initial_count);
++    auto replacement = Config(854, 480);
++    ASSERT_TRUE(stream_.UpdateVideoConfig(replacement, false));
++    stream_.OnStartOfCodedFrameGroup(base::TimeDelta());
++    stream_.Append(Frames(91, 33333));
++    scoped_refptr<StreamParserBuffer> frame;
++    // The replacement is buffered but there is no later keyframe. The old
++    // implementation returned kNeedBuffer forever at this point.
++    ASSERT_EQ(SourceBufferStreamStatus::kConfigChange, stream_.GetNextBuffer(&frame));
++    ASSERT_TRUE(stream_.GetCurrentVideoDecoderConfig().Matches(replacement));
++    for (int i = 0; i < 91; ++i) {
++      ASSERT_EQ(SourceBufferStreamStatus::kSuccess, stream_.GetNextBuffer(&frame));
++      EXPECT_EQ(base::Microseconds(i * 33333), frame->timestamp());
++      EXPECT_EQ(i == 0, frame->is_key_frame());
++    }
++    EXPECT_EQ(SourceBufferStreamStatus::kNeedBuffer, stream_.GetNextBuffer(&frame));
++  }
++};
++
++TEST_F(WebosSourceBufferConfigOverlapTest, ReplacesConsumedFirstFrame) {
++  ReplaceAndRead(1);
++}
++TEST_F(WebosSourceBufferConfigOverlapTest, ReplacesConsumedOpeningFrames) {
++  ReplaceAndRead(20);
++}
++TEST_F(WebosSourceBufferConfigOverlapTest, SwitchesAfterUnreadOldFramesDrain) {
++  stream_.Seek(base::TimeDelta());
++  stream_.OnStartOfCodedFrameGroup(base::TimeDelta());
++  stream_.Append(Frames(20, 16666));
++  scoped_refptr<StreamParserBuffer> frame;
++  ASSERT_EQ(SourceBufferStreamStatus::kSuccess, stream_.GetNextBuffer(&frame));
++  auto replacement = Config(854, 480);
++  ASSERT_TRUE(stream_.UpdateVideoConfig(replacement, false));
++  stream_.OnStartOfCodedFrameGroup(base::TimeDelta());
++  stream_.Append(Frames(91, 33333));
++  for (int i = 1; i < 20; ++i) {
++    ASSERT_EQ(SourceBufferStreamStatus::kSuccess, stream_.GetNextBuffer(&frame));
++    EXPECT_EQ(base::Microseconds(i * 16666), frame->timestamp());
++  }
++  ASSERT_EQ(SourceBufferStreamStatus::kConfigChange, stream_.GetNextBuffer(&frame));
++  ASSERT_TRUE(stream_.GetCurrentVideoDecoderConfig().Matches(replacement));
++  ASSERT_EQ(SourceBufferStreamStatus::kSuccess, stream_.GetNextBuffer(&frame));
++  EXPECT_TRUE(frame->is_key_frame());
++  EXPECT_EQ(base::TimeDelta(), frame->timestamp());
++}
++
++TEST_F(WebosSourceBufferConfigOverlapTest, DoesNotReplayUnchangedConfig) {
++  ConsumeInitial(1);
++  stream_.OnStartOfCodedFrameGroup(base::TimeDelta());
++  stream_.Append(Frames(91, 33333));
++  scoped_refptr<StreamParserBuffer> frame;
++  EXPECT_EQ(SourceBufferStreamStatus::kNeedBuffer, stream_.GetNextBuffer(&frame));
++}
++}  // namespace
++}  // namespace media
++#endif  // defined(STARBOARD_WEBOS)
