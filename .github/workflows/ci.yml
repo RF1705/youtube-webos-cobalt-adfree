@@ -52,6 +52,7 @@ jobs:
             cobalt/media/base
             cobalt/system_window
             net
+            third_party/chromium/media/filters
 
       - name: Install microphone overlay twice on clean Cobalt
         run: |
