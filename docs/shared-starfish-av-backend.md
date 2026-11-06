@@ -124,7 +124,7 @@ adaptive representation switch can leave Cobalt's video read pending even though
 the stream is buffered. The rate gate cannot fix missing demuxer output. See
 `docs/playback-rate-stall.md` for the root cause and the separate HD quality fix.
 
-All in-place rate transitions require replay coverage, at least two callbacks,
+Rate transitions on playing sessions and after seeks require replay coverage, at least two callbacks,
 presentation at least 200 ms beyond the native target, accepted video at least
 1 s ahead and audio at least 200 ms ahead. The old two-second forced transition
 has been removed. While waiting,
@@ -161,3 +161,17 @@ error rather than switching backend mid-playback. A missing vendor Unload
 completion quarantines that session until Cobalt restarts; a synchronous
 vendor API hang cannot be cancelled by this implementation. These risks should
 remain visible in the PR until follow-up TV tests are complete.
+
+The demuxer requests configured Opus seek preroll but clamps to the available
+MSE range. The native adapter accepts that actual gap and calculates the discard
+in 48 kHz samples without moving the requested position. The original codec
+pre-skip is still enforced at stream origin, and the 16-bit discard field cannot
+wrap. A queued keyframe beyond the snap window ends scanning immediately when
+audio is available, preserving all packets for exact-target native-1x preroll.
+
+A fresh stream-origin session configures its initial speed while natively paused:
+feed decoder initialization, wait for native Load completion, set the requested
+rate with replay coverage, and accept replay from both streams before first
+Play. This avoids playing at 1x and then flushing an already-running pipeline.
+The exception ends at first Play; non-origin seeks and later changes retain the stronger
+presentation/headroom gate. There is no timeout that forces the initial rate.

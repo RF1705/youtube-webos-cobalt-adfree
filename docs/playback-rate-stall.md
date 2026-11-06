@@ -252,7 +252,8 @@ seek-progress frames=1 ... (frozen until the 20 s watchdog)
 
 The same log contains a successful transition on a session that was already
 presenting (`replay-drained ... frames=37`, then 37 -> 52 frames at 1.75x), so
-the flush is only safe once the new session is actually presenting. `Step()`
+the flushing transition on that playing/seek session was only safe once native
+presentation was advancing. For those sessions, `Step()`
 therefore requires two callbacks, presentation at least 200 ms beyond the native
 target, accepted video at least 1 s ahead and audio at least 200 ms ahead,
 in addition to replay coverage. No rate request falls back to an unsafe flushing
@@ -315,3 +316,20 @@ not an advertisement of support for arbitrary 105-fps source files. Auto quality
 and explicit user quality preferences remain under YouTube's control. The C1
 packaged-build test retained 1080p60 at 1.75x and 2x; this does not establish
 4K/60 playback above Normal speed or support on other firmware.
+
+The subsequent user-reported 46:00 seek exposed a separate short-audio-preroll
+case: the target was 2760.028160 s, but the first decoded audio packet was at
+2759.994500 s. Chromium clamps configured seek preroll to the available MSE
+range. Our native minimum-gap check incorrectly treated that valid result as an
+error. Removing the extra minimum and computing the 1,616-sample discard from
+the actual timestamps preserves the exact requested target. The tested
+position-shift workaround was removed. Stream-origin codec delay and the
+16-bit discard bound remain enforced.
+
+Cold media startup at a retained fast rate is separate from seek recovery. A
+fresh stream-origin session can remain natively paused while input initializes
+the decoders and Load completes. It then applies the requested speed, replays
+the flushed data and accepts both streams before first Play. This avoids the
+initial 1x-then-flush sequence without a fixed delay. It is limited to a fresh native session at stream origin (including a seek back
+to zero). Non-origin seeks and changes after first Play retain the forward-
+presentation gate.

@@ -4,7 +4,69 @@ The C1's reproduced accelerated startup stall and 480p downgrade are fixed.
 The final review follow-up also fixes long-GOP and end-of-stream rate timeouts.
 Earlier rejected candidates and their findings are retained below as history.
 
-## Latest candidate
+## Follow-up: exact audio seeks and initial-speed playback
+
+Executable: `f86f1113f7d411b71451bdf77db7571a37912f99b262553280724316abec8f96`.
+
+The reported seek target was 2760.028160 s and the first decoded audio timestamp
+was 2759.994500 s. Cobalt's SourceBuffer requests the configured Opus preroll,
+but clamps it to the available MSE range. Our adapter incorrectly rejected any
+non-origin gap below 80 ms. It now calculates the discard from the actual packet
+and target timestamps (1,616 samples in this case) and keeps the exact target.
+The original stream-origin codec delay is still enforced; the discard limit
+comes from the 16-bit Opus header field and the 48 kHz output rate.
+See [SourceBufferStream::Seek](https://github.com/youtube/cobalt/blob/23.lts.6/third_party/chromium/media/filters/source_buffer_stream.cc).
+The earlier 46.34 ms position-shift workaround was rejected and removed.
+
+The timestamp-correct candidate was tested on the C1 with the exact reported
+native timestamps: Load retained 2760.028160 s, reported discard_samples=1616,
+and measured playback was 1.7549x over a settled 14.57 s window. Source identity,
+frame growth and hardware DISPLAY captures were checked. A second seek with
+short preroll also played without a source retry. The first two-case test run
+stopped because its second target was already buffered; that run is not counted
+as two unbuffered seeks. The later exact-case run was independently collected.
+
+The user clarified the startup report: return from a 1.75x video to the list,
+then select another video from the beginning, with about 2–3 s of black screen.
+A warm seek is not evidence for that cold-media startup path. Remote tests now
+use the actual BACK/list/ENTER flow and record media starting at zero.
+
+For a fresh stream-origin session, native playback now stays paused until Load
+completes. The adapter sets the requested initial rate with replay coverage,
+re-feeds the flushed data, and waits for accepted audio and video before its
+first native Play. Playback therefore starts at the requested speed rather than
+playing briefly at 1x and flushing an already-running pipeline. No elapsed-time
+fallback or presentation-delay threshold is used for that initial setup. Non-origin seeks
+and later rate changes keep the established presentation/headroom checks.
+Host tests cover 0.5x/1x/1.75x/2x setup order, independent stream backpressure,
+missing replay, initially paused playback, request replacement, seek cancellation,
+and disallowing reuse after first Play.
+Two native paused-start prototype videos and the final build reached from the
+list sustained 1.75x with changing DISPLAY captures. The final run showed its
+first moving picture 2.016 s after ENTER and measured 1.7520x over the settled
+window. Native Load-to-first-frame took 0.285 s and first Play already used 1.75x.
+These are different videos, not a controlled network/cache latency benchmark.
+Full navigation still includes client and network work; no sub-second end-to-end
+startup claim is made. On the same final binary, the reported seek measured
+1.7253x (within the 0.08 tolerance), Normal 1.0012x, and resume 1.7507x. Pause
+remained stationary. Normal reload still has a visible temporary black frame;
+these checks do not establish zero dropped frames or audible A/V sync.
+
+A prototype that waited for Load completion before feeding was rejected on the
+C1: completion requires input. Another attempted full-app cold test was rejected
+because the old PID did not exit; a fresh-PID run reset the client speed to 1x
+and is only a normal-speed control. An EAC3 video used the legacy backend and is
+not evidence for the shared Opus path. These cases are retained in local records.
+
+The scan also stops once a queued later keyframe proves the nearby window
+cannot be satisfied and audio is present. It preserves all packets for native-1x
+fallback instead of waiting out the two-second deadline. The earlier 3.351 s to
+1.773 s comparison measures a warm native resume phase, not cold media startup.
+Native production-method tests, session-state checks with UBSan, Python syntax
+checks and ARM builds pass. Evidence is local in `pr136-cold-start/` and
+`pr136-user-regression/`. Audible A/V sync and other devices remain unverified.
+
+## Previous candidate
 
 Executable: `9ab047e183842e58194efce7e159fc54ee5ade82fbfb1be2aeb7c27db6ed0706`.
 The installed running process matched this hash. The owner manually tested this
@@ -122,7 +184,7 @@ were restored after testing; the local candidate and code are preserved.
 
 | Request | Behavior and host evidence |
 | --- | --- |
-| Remove the unsafe rate timeout | Every post-feed transition requires replay coverage, two callbacks, presentation 200 ms beyond the target, and accepted compressed headroom. While native presentation advances, keep waiting safely at the applied rate. After 5 s without forward presentation, report a player decode error without calling SetPlayRate; a fully fed tail waits for native EOS under the existing 20 s watchdog. Tests cover missing history, missing presentation, and a fresh deadline for a new request. |
+| Remove the unsafe rate timeout | Rate changes on playing/seek sessions require replay coverage, two callbacks, presentation 200 ms beyond the target, and accepted compressed headroom. A new stream-origin session configures its initial rate while natively paused, after Load completion, and accepts replay from both streams before first Play. While native presentation advances, keep waiting safely at the applied rate. After 5 s without forward presentation, report a player decode error without calling SetPlayRate; a fully fed tail waits for native EOS under the existing 20 s watchdog. Tests cover missing history, missing presentation, and a fresh deadline for a new request. |
 | Reliable return to Normal | Reload only with a nearby video GOP and a valid Opus plan. Retry while the old session advances, including beyond 5 s for long GOPs at slow rates; fail only after 5 s without forward presentation, except a fully fed tail. Never send SetPlayRate(1.0). The media clock reports the applied rate, including during failure, and zero while paused. Tests cover both 0.5x and 1.75x, cache exhaustion, later coverage, and cancellation. |
 | Seek accuracy and fallback | Keyframes may be at most 900 ms ahead, leaving 100 ms for the native start guard; the final snapped start must be within 1 s of the target in either direction. After 2 s of input without a nearby start, preserve the GOP and exact target, decode at native 1x, and gate the later rate flush on presentation and input headroom. Tests cover forward-bound edges, audio pushing the start out of bounds, distant first packets, no packet loss on timeout, and stale generations. |
 | Wider regression coverage | The host fixture compiles production Seek, AcquireSeekStart, Start, Time, Rate, Pause, Feed and Step against a fake vendor API. It exercises H.264/VP9/AV1 Load payloads and configuration checks, pause/resume, return to Normal, three successive seeks per codec, stale callbacks, rapid requests and EOS. Physical H.264/VP9/HDR and other webOS versions remain unverified. |
