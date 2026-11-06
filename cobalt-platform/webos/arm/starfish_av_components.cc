@@ -265,6 +265,9 @@ struct NativeSession {
   bool replaying = false;
   bool rate_deferred = false;
   bool initial_rate_attempted = false;
+  // A new stream-origin session prepares its rate while natively paused.
+  // Clear only after both streams have supplied input for the first Play.
+  bool initial_play_pending = false;
   SbTime rate_deferred_at = 0;
   int64_t rate_deferred_frame_ns = -1;
   double rate_deferred_value = 0;
@@ -738,21 +741,22 @@ class Owner : public player::JobQueue::JobOwner {
     SbTime target, first_audio, first_video;
     int width, height;
     unsigned bits;
-    bool hdr, snapped, prearmed, restart;
+    bool hdr, snapped, prearmed, restart, origin;
     std::deque<NativeSession::Replay::Entry> restart_audio, restart_video;
     {
       Guard guard(mutex_);
       if (!first_audio_ || !first_video_ || !error_.empty() ||
           state_.generation() != generation) return nullptr;
       snapped = snapped_;
+      origin = audio_origin_;
       // Ownership of a pre-armed window transfers to the session only once the
       // session exists; clearing the flag earlier would orphan it whenever the
       // Opus plan below rejects the start.
       prearmed = window_prearmed_;
       restart = !restart_audio_.empty() && !restart_video_.empty();
       if (restart) {
-        // Reload at the presented position from the retained GOP. The plan needs
-        // 80 ms of Opus pre-roll before the target; the shift is invisible.
+        // Reload at the presented position from the retained GOP, discarding
+        // exactly the audio before that position without shifting the clock.
         first_audio = restart_audio_.front().packet.pts_us;
         first_video = restart_video_.front().packet.pts_us;
         if (!PlanStarfishRateRestart(config_, first_audio, first_video,
@@ -784,6 +788,8 @@ class Owner : public player::JobQueue::JobOwner {
     }
     std::unique_ptr<NativeSession> session(new NativeSession(generation));
     session->plan = plan;
+    session->initial_play_pending = RateReplayEnabled() && !restart && origin &&
+                                 target == 0 && first_video == 0;
     session->seek_progress = snapped;
     session->rate = 1;  // a reloaded native session always starts at 1x
     if (restart) {
@@ -1134,7 +1140,13 @@ class Owner : public player::JobQueue::JobOwner {
       const bool new_request =
           !session.rate_deferred ||
           std::fabs(rate - session.rate_deferred_value) > 0.0001;
-      if (!can_replay || !presented || !headroom || (normal_restart && !restart_usable)) {
+      // A stream-origin session has not called native Play yet. Configure
+      // its initial rate after Load completion, then replay the flushed data
+      // before the first Play. Seeks and already-playing sessions still need
+      // the presentation/headroom gate below.
+      const bool paused_start = session.initial_play_pending && !session.playing;
+      if (!can_replay || ((!presented || !headroom) && !paused_start) ||
+          (normal_restart && !restart_usable)) {
         // A recreated session starts at 1x. Its first GOP must be replayable
         // and already presenting before the firmware's flushing rate
         // transition; otherwise the video decoder can wait for a keyframe
@@ -1209,6 +1221,12 @@ class Owner : public player::JobQueue::JobOwner {
         const auto payload = FormatString("{\"playRate\":%.4f,\"audioOutput\":true}", rate);
         if (!session.api->SetPlayRate(payload.c_str())) { FailSession(session, "shared rate rejected"); return; }
         session.rate = rate;
+        if (paused_start) {
+          // Wait for accepted replay from both streams before the first Play.
+          session.audio_fed = session.video_fed = false;
+          TraceRate("paused-start-rate generation=%llu rate=%.6g",
+                    static_cast<unsigned long long>(session.generation), rate);
+        }
         session.rate_changed_at = now;
         session.next_rate_trace = now;
         session.rate_frame = session.frame_ns.load();
@@ -1231,6 +1249,9 @@ class Owner : public player::JobQueue::JobOwner {
       session.rate_deferred_frame_ns = -1;
       session.rate_deferred_value = 0;
     }
+    if (session.initial_play_pending && loaded && !paused && session.audio_fed &&
+        session.video_fed && std::fabs(rate - session.rate) < 0.0001)
+      session.initial_play_pending = false;
     if (paused && session.playing) {
       if (!session.api->Pause()) { FailSession(session, "shared Pause rejected"); return; }
       session.playing = false;
@@ -1241,7 +1262,8 @@ class Owner : public player::JobQueue::JobOwner {
       session.rate = 1;
       Trace("paused generation=%llu", static_cast<unsigned long long>(session.generation));
       ApplicationSdl::Get()->SetVideoPaused(true);
-    } else if (!paused && session.audio_fed && session.video_fed &&
+    } else if (!paused && !session.initial_play_pending &&
+               session.audio_fed && session.video_fed &&
                ((!session.playing && now - session.last_play_attempt >= 250000) ||
                 (loaded && !session.was_loaded))) {
       const bool first_attempt = session.last_play_attempt == 0;

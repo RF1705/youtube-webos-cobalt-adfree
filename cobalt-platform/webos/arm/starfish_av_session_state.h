@@ -14,6 +14,10 @@ namespace starboard {
 namespace shared {
 namespace webos {
 
+constexpr int64_t kStarfishOpusSampleRate = 48000;
+constexpr unsigned kStarfishOpusMaxDiscardSamples =
+    std::numeric_limits<uint16_t>::max();
+
 // Shared-session building blocks for the native webOS player.
 // Deliberately independent of the firmware API so invariants can be host tested.
 struct StarfishOpusConfig {
@@ -75,14 +79,17 @@ inline bool PlanStarfishOpusSession(
 
   const int64_t gap_us = target_us - first_decoded_audio_us;
   // The fresh decoder's pre-skip field is only 16 bits. No wrapping and no
-  // silent truncation of missing seek pre-roll. Near-origin seeks may use the
-  // original beginning instead, but must still honor the original pre-skip.
-  if (gap_us > 1365333 || (!starts_at_stream_origin && gap_us < 80000))
-    return false;
+  // silent truncation. The demuxer requests the config's seek preroll, but
+  // clamps it to the available MSE range. Accept that actual preroll and
+  // discard only samples before the requested target; do not move the seek.
+  // Only stream-origin playback must honor the original codec pre-skip.
+  if (gap_us > kStarfishOpusMaxDiscardSamples * 1000000LL /
+                   kStarfishOpusSampleRate) return false;
   // Cobalt timestamps have microsecond precision; round to the nearest sample
   // instead of requiring every timestamp to represent an exact 48 kHz sample.
-  const auto discard = static_cast<unsigned>((gap_us * 48 + 500) / 1000);
-  if (discard > 65535 ||
+  const auto discard = static_cast<unsigned>(
+      (gap_us * kStarfishOpusSampleRate + 500000) / 1000000);
+  if (discard > kStarfishOpusMaxDiscardSamples ||
       (starts_at_stream_origin && discard < checked.pre_skip_samples()))
     return false;
 
@@ -121,6 +128,7 @@ struct StarfishSeekSnapDecision {
     kWait,            // no queued video yet
     kFeedFromFront,   // front keyframe is already within the window
     kKeepScanning,    // the demuxer has not queued a usable keyframe yet
+    kOutsideWindow,   // a later keyframe proves no nearby start can arrive
     kStartAtKeyframe  // release |discard_count| leading packets; start there
   };
   Action action = Action::kWait;
@@ -142,10 +150,18 @@ inline StarfishSeekSnapDecision PlanStarfishSeekSnap(
     decision.action = StarfishSeekSnapDecision::Action::kFeedFromFront;
     return decision;
   }
+  if (video.front().is_key_frame &&
+      video.front().pts_us > target_us + max_ahead_us) {
+    decision.action = StarfishSeekSnapDecision::Action::kOutsideWindow;
+    return decision;
+  }
   for (size_t i = 1; i < video.size(); ++i) {
     if (!video[i].is_key_frame || video[i].pts_us < target_us - window_us)
       continue;
-    if (video[i].pts_us > target_us + max_ahead_us) break;
+    if (video[i].pts_us > target_us + max_ahead_us) {
+      decision.action = StarfishSeekSnapDecision::Action::kOutsideWindow;
+      return decision;
+    }
     decision.action = StarfishSeekSnapDecision::Action::kStartAtKeyframe;
     decision.discard_count = i;
     decision.keyframe_us = video[i].pts_us;
@@ -365,10 +381,10 @@ inline bool PlanStarfishRateRestart(
     int64_t first_video_us, int64_t position_us, int64_t* restart_us,
     StarfishOpusSessionPlan* plan) {
   const int64_t limit = std::numeric_limits<int64_t>::max() / 1000;
-  if (!restart_us || !plan || first_audio_us > limit - 80000 ||
+  if (!restart_us || !plan || first_audio_us > position_us ||
       first_audio_us < -limit || position_us < 0 || position_us > limit ||
       first_video_us < 0 || first_video_us > position_us) return false;
-  const int64_t target = std::max(position_us, first_audio_us + 80000);
+  const int64_t target = position_us;
   if (target - first_video_us > kStarfishSeekSnapWindowUs ||
       !PlanStarfishOpusSession(config, first_audio_us, first_video_us,
                                target, false, plan)) return false;
@@ -475,8 +491,14 @@ class StarfishSeekRetarget {
         return result;
       }
     }
-    if (now_us - started_us_ >= kStarfishSeekRetargetDeadlineUs) {
-      // Nothing was released. The owner can decode this GOP at native 1x and
+    const bool passed_window =
+        decision.action == StarfishSeekSnapDecision::Action::kOutsideWindow;
+    const bool have_audio = !state->Peek(Stream::kAudio, 1).empty();
+    if ((passed_window && have_audio) ||
+        now_us - started_us_ >= kStarfishSeekRetargetDeadlineUs) {
+      // A later keyframe cannot improve this seek: start immediately instead
+      // of leaving a black surface until the scan deadline. Nothing was
+      // released. The owner can decode this GOP at native 1x and
       // keep rate changes gated until presentation advances past the target.
       active_ = false;
       stats_.given_up = true;

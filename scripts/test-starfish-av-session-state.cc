@@ -130,8 +130,10 @@ void TestTiming() {
   // Backward seek near the stream origin may have less than 80 ms available.
   assert(PlanStarfishOpusSession(original, -6500, 0, 20000, true, &plan));
   assert(plan.discard_samples == 1272);
-  assert(!PlanStarfishOpusSession(original, 10000, 0, 20000, false, &plan));
-  assert(!PlanStarfishOpusSession(original, 0, 0, 79999, false, &plan));
+  assert(PlanStarfishOpusSession(original, 10000, 0, 20000, false, &plan));
+  assert(plan.target_native_us == 20000 && plan.discard_samples == 480);
+  assert(PlanStarfishOpusSession(original, 0, 0, 79999, false, &plan));
+  assert(plan.target_native_us == 79999);
   assert(!PlanStarfishOpusSession(original, 1, 0, 0, true, &plan));
   assert(!PlanStarfishOpusSession(original, -10000, 0, -1, true, &plan));
   assert(PlanStarfishOpusSession(original, 0, 0, 1365312, false, &plan));
@@ -383,7 +385,7 @@ void TestSeekSnapPolicy() {
   const std::vector<StarfishSeekSnapCandidate> too_far{{kFarKeyframeUs, true},
                                                        {kFarTargetUs + 6 * 1000000, true}};
   decision = PlanStarfishSeekSnap(too_far, kFarTargetUs, window, ahead);
-  assert(decision.action == Action::kKeepScanning);
+  assert(decision.action == Action::kOutsideWindow);
 
   decision = PlanStarfishSeekSnap({}, kFarTargetUs, window, ahead);
   assert(decision.action == Action::kWait);
@@ -495,8 +497,8 @@ void TestSeekRetarget() {
   assert(direct.Step(&near, near.generation(), 1000).action == Action::kDirect);
   assert(near.queued_packets(video) == 1 && near.queued_packets(audio) == 1);
 
-  // Without a usable keyframe expiry preserves packets for error reporting;
-  // the caller must never load the old, known-stalling GOP.
+  // With no later keyframe yet, expiry preserves packets for native 1x
+  // preroll. The later rate change still requires forward presentation.
   StarfishSeekRetarget<State> stuck;
   stuck.Begin(kFarTargetUs, 0);
   State long_gop({256, 1 << 20}, {kHold, 32 << 20});
@@ -530,8 +532,8 @@ void TestSeekRetargetBoundsAndReset() {
       assert(state.Enqueue(state.generation(), video, {KeyPacket(target-5000000)}) == Enqueue::kAccepted);
     assert(state.Enqueue(state.generation(), video, {KeyPacket(target+5000000)}) == Enqueue::kAccepted);
     const auto count = state.queued_packets(video);
-    assert(retarget.Step(&state, state.generation(), 1).action == Action::kWait);
-    assert(retarget.Step(&state, state.generation(), 2000001).action == Action::kGiveUp);
+    assert(retarget.Step(&state, state.generation(), 1).action == Action::kGiveUp);
+    assert(!retarget.active());
     assert(state.queued_packets(video) == count && state.queued_packets(audio) == 1);
   }
   // Account for the 100 ms native-start guard: +900 ms is the latest usable
@@ -547,7 +549,7 @@ void TestSeekRetargetBoundsAndReset() {
     if (offset == 900000) {
       assert(result.action == Action::kStart && retarget.start_us() == target+1000000);
     } else {
-      assert(result.action == Action::kWait && state.queued_packets(video) == 2);
+      assert(result.action == Action::kGiveUp && state.queued_packets(video) == 2);
     }
   }
   // Late audio cannot move an otherwise valid keyframe beyond the tolerance.
@@ -569,6 +571,37 @@ void TestSeekRetargetBoundsAndReset() {
   assert(retarget.Step(&state, state.generation(), 102).action == Action::kDirect);
 }
 
+void TestShortPrerollPlan() {
+  StarfishOpusSessionPlan plan;
+  // Exact user-reported timestamps: the MSE audio range begins too late for
+  // the full configured preroll. Discard 1616 samples, preserving the target.
+  assert(PlanStarfishOpusSession(Config(),2759994500,2757708333,
+                                 2760028160,false,&plan));
+  assert(plan.target_native_us==2760028160 && plan.discard_samples==1616);
+  for (int64_t gap : {0,1,10000,33660,50000,79999,80000,100000}) {
+    const int64_t target=1000000;
+    assert(PlanStarfishOpusSession(Config(),target-gap,0,target,false,&plan));
+    assert(plan.target_native_us==target);
+    assert(plan.discard_samples==(gap*48+500)/1000);
+  }
+  // Never accept audio after the target or alter stream-origin codec delay.
+  assert(!PlanStarfishOpusSession(Config(),1000001,0,1000000,false,&plan));
+  assert(!PlanStarfishOpusSession(Config(),0,0,0,true,&plan));
+}
+void TestKnownDistantNextKeyframe() {
+  State state({4,1000},{4,1000});
+  const auto gen=state.generation();
+  state.Enqueue(gen,video,{KeyPacket(2752083333),KeyPacket(2757708333)});
+  StarfishSeekRetarget<State> retarget;
+  retarget.Begin(2756000000,0);
+  // Wait for audio to avoid starting while its actual first packet is unknown.
+  assert(retarget.Step(&state,gen,100).action==StarfishSeekRetargetResult::Action::kWait);
+  state.Enqueue(gen,audio,{Packet(100,2755894500)});
+  assert(retarget.Step(&state,gen,101).action==StarfishSeekRetargetResult::Action::kGiveUp);
+  assert(state.queued_packets(video)==2 && state.queued_packets(audio)==1);
+  assert(retarget.stats().video_packets==0 && retarget.stats().audio_packets==0);
+}
+
 void TestRateRestartPlan() {
   StarfishOpusSessionPlan plan;
   int64_t target = -1;
@@ -577,9 +610,9 @@ void TestRateRestartPlan() {
   assert(target == -1);
   assert(PlanStarfishRateRestart(Config(), 3900000, 4000000, 4000000, &target, &plan));
   assert(target == 4000000 && plan.discard_samples == 4800);
-  // Preserve the position, advancing only enough to provide Opus pre-roll.
+  // Preserve the exact position even when less preroll is available.
   assert(PlanStarfishRateRestart(Config(), 3950000, 4000000, 4000000, &target, &plan));
-  assert(target == 4030000 && plan.discard_samples == 3840);
+  assert(target == 4000000 && plan.discard_samples == 2400);
   assert(!PlanStarfishRateRestart(Config(), 3900000, 4100000, 4000000, &target, &plan));
   assert(!PlanStarfishRateRestart(Config(), std::numeric_limits<int64_t>::max(),
                                  0, 4000000, &target, &plan));
@@ -600,5 +633,7 @@ int main() {
   TestSeekRetarget();
   TestSeekRetargetBoundsAndReset();
   TestRateRestartPlan();
+  TestShortPrerollPlan();
+  TestKnownDistantNextKeyframe();
   std::cout << "Shared Starfish A/V timing and session-state tests passed\n";
 }

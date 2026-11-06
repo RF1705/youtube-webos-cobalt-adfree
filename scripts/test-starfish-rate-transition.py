@@ -94,6 +94,7 @@ struct StarfishMediaAPIs {
   struct Fed { int64_t pts; int stream; };
   std::vector<Fed> fed;
   bool full=false, reject_rate=false;
+  int full_stream=0;
   int rate_calls=0, eos_calls=0, fed_before_rate=-1;
   std::string last_rate;
   std::string load_payload;
@@ -104,9 +105,9 @@ struct StarfishMediaAPIs {
     return true;
   }
   std::string Feed(const char* payload) {
-    if (full) return "BufferFull";
     const auto* pts = std::strstr(payload, "\"pts\":");
     const auto* stream = std::strstr(payload, "\"esData\":");
+    if (full || (full_stream && std::stoi(stream + 9)==full_stream)) return "BufferFull";
     fed.push_back({std::stoll(pts + 6), std::stoi(stream + 9)});
     return "Ok";
   }
@@ -258,6 +259,121 @@ void TestCodecLifecycles() {
       assert(owner.error_.empty());
     }
   }
+}
+
+
+std::unique_ptr<NativeSession> ColdSession(Owner& owner) {
+  owner.Seek(0); owner.Rate(0);
+  const auto gen=owner.state_.generation();
+  assert(owner.state_.Enqueue(gen,Stream::kAudio,
+      {Packet(-6500),Packet(2000000)})==State::EnqueueResult::kAccepted);
+  assert(owner.state_.Enqueue(gen,Stream::kVideo,
+      {Packet(0,true),Packet(2000000)})==State::EnqueueResult::kAccepted);
+  owner.first_audio_=owner.first_video_=owner.audio_origin_=true;
+  owner.first_audio_pts_=-6500; owner.first_video_pts_=0; owner.video_bits_=8;
+  assert(owner.AcquireSeekStart(gen));
+  auto session=owner.Start(gen);
+  assert(session && session->initial_play_pending);
+  return session;
+}
+void TestInitialRateBeforeFirstPlay() {
+  for (double rate : {0.5,1.0,1.75,2.0}) {
+    Owner owner; auto session=ColdSession(owner);
+    owner.Step(*session);
+    assert(owner.ready_ && !session->api->fed.empty());
+    assert(session->api->calls.empty()); // no Play before Load completion
+    owner.Rate(rate); owner.Step(*session);
+    assert(session->api->calls.empty()); // requested rate waits for native caps
+    session->loaded=true; owner.Step(*session);
+    if (rate==1) {
+      assert(session->api->rate_calls==0 && session->api->calls==std::vector<std::string>{"play"});
+    } else {
+      assert(session->api->calls==std::vector<std::string>{"rate"});
+      assert(session->initial_play_pending && !session->playing);
+      assert(!session->audio_fed && !session->video_fed);
+      // Replay must actually be accepted. BufferFull cannot release Play.
+      session->api->full=true; owner.Step(*session);
+      assert(session->api->calls==std::vector<std::string>{"rate"});
+      session->api->full=false; session->api->full_stream=1;
+      owner.Step(*session);
+      assert(session->audio_fed && !session->video_fed);
+      assert(session->api->calls==std::vector<std::string>{"rate"});
+      session->api->full_stream=0; owner.Step(*session);
+      assert(session->api->calls==std::vector<std::string>({"rate","play"}));
+    }
+    assert(session->playing && !session->initial_play_pending);
+    assert(session->rate==rate && owner.error_.empty());
+    assert(session->frame_count==0); // first Play already has the requested rate
+    // The exception cannot be reused for a rate change after Play.
+    const int calls=session->api->rate_calls;
+    owner.Rate(rate==1.75?1.5:1.75); owner.Step(*session);
+    assert(session->api->rate_calls==calls && session->rate_deferred);
+  }
+}
+void TestPausedInitialRateAndMissingReplay() {
+  Owner paused; auto session=ColdSession(paused);
+  paused.Pause(true); paused.Step(*session); session->loaded=true;
+  paused.Step(*session);
+  assert(session->api->calls.empty() && session->initial_play_pending);
+  paused.Rate(1.75); paused.Step(*session);
+  assert(session->api->calls.empty()); // no unsolicited Play/rate while paused
+  paused.Pause(false); paused.Step(*session); paused.Step(*session);
+  assert(session->api->calls==std::vector<std::string>({"rate","play"}));
+
+  Owner missing; auto ms=ColdSession(missing);
+  missing.Step(*ms); ms->loaded=true; missing.Rate(1.75);
+  ms->video_history.Accept({std::make_shared<Buffer>(),17*1024*1024,0},false,0);
+  missing.Step(*ms);
+  assert(ms->api->calls.empty() && ms->rate_deferred);
+  now_us=ms->rate_deferred_at+kStarfishRateTransitionDeadlineUs;
+  missing.Step(*ms);
+  assert(ms->api->calls.empty() && !missing.error_.empty());
+}
+
+void TestInitialRequestReplacementAndSeekCancellation() {
+  Owner replaced; auto session=ColdSession(replaced);
+  replaced.Step(*session); session->loaded=true; replaced.Rate(1.75);
+  replaced.Step(*session);
+  assert(session->initial_play_pending && session->api->calls==std::vector<std::string>{"rate"});
+  session->api->full=true;
+  replaced.Rate(1.5); replaced.Step(*session);
+  assert(session->api->calls==std::vector<std::string>({"rate","rate"}));
+  assert(session->rate==1.5 && !session->playing);
+  session->api->full=false; replaced.Step(*session);
+  assert(session->api->calls==std::vector<std::string>({"rate","rate","play"}));
+  assert(session->rate==1.5 && replaced.error_.empty());
+
+  Owner cancelled; auto stale=ColdSession(cancelled);
+  cancelled.Step(*stale); stale->loaded=true; cancelled.Rate(1.75);
+  cancelled.before_rate_hook=[&] { cancelled.Seek(kSecond); };
+  cancelled.Step(*stale);
+  assert(stale->api->calls.empty()); // stale snapshots cannot apply a rate or Play
+  assert(stale->generation!=cancelled.state_.generation());
+  assert(cancelled.error_.empty() && !cancelled.restart_pending_);
+}
+
+void TestShortAudioPrerollSeek() {
+  Owner owner;
+  const int64_t requested=2760028160;
+  const int64_t audio=2759994500, video=2757708333;
+  owner.Seek(requested);
+  const auto generation=owner.state_.generation();
+  owner.state_.Enqueue(generation,Stream::kAudio,{Packet(audio)});
+  owner.state_.Enqueue(generation,Stream::kVideo,
+      {Packet(video,true),Packet(2763333333,true)});
+  owner.first_audio_=owner.first_video_=true;
+  owner.first_audio_pts_=audio; owner.first_video_pts_=video;
+  owner.video_bits_=8;
+  // The next keyframe is outside the window. No two-second black wait, no
+  // discarded packets, and no shift of the requested A/V start.
+  assert(owner.AcquireSeekStart(generation));
+  auto session=owner.Start(generation);
+  assert(session && owner.error_.empty());
+  assert(owner.current_==requested);
+  assert(session->plan.target_native_us==requested);
+  assert(session->plan.discard_samples==1616 && session->rate==1);
+  assert(owner.state_.queued_packets(Stream::kAudio)==1);
+  assert(owner.state_.queued_packets(Stream::kVideo)==2);
 }
 
 void TestProgressingLongGopNormal() {
@@ -696,7 +812,7 @@ int main() {
   Owner failed_seek;
   failed_seek.Seek(10*kSecond);
   auto gen=failed_seek.state_.generation();
-  failed_seek.state_.Enqueue(gen,Stream::kVideo,{Packet(5*kSecond,true),Packet(15*kSecond,true)});
+  failed_seek.state_.Enqueue(gen,Stream::kVideo,{Packet(5*kSecond,true),Packet(15*kSecond)});
   failed_seek.state_.Enqueue(gen,Stream::kAudio,{Packet(10*kSecond-100000)});
   failed_seek.first_audio_=failed_seek.first_video_=true;
   failed_seek.first_audio_pts_=10*kSecond-100000;
@@ -719,6 +835,10 @@ int main() {
   failed_seek.Step(*exact);
   assert(exact->api->rate_calls==0); // still only seek preroll
 
+  TestInitialRateBeforeFirstPlay();
+  TestPausedInitialRateAndMissingReplay();
+  TestInitialRequestReplacementAndSeekCancellation();
+  TestShortAudioPrerollSeek();
   TestProgressingLongGopNormal();
   TestRateAtDrainedEos();
   TestStallAfterDeferredProgress();
