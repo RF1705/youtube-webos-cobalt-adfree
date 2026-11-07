@@ -1,35 +1,38 @@
 # Shared A/V playback speed fixes
 
-The shared Starfish backend needs separate handling for flushing rate changes,
-seek preroll and adaptive representation changes. These fixes were developed
-from LG C1 traces; other firmware still needs device validation. See
-[backend lifecycle](shared-starfish-av-backend.md) and
+The shared Starfish backend needs separate handling for in-place rate changes,
+seek preroll and adaptive representation changes. The rate model was verified
+against the stock YouTube Cobalt pipeline on the same firmware. These fixes
+were developed from LG C1 traces; other firmware still needs device validation.
+See [backend lifecycle](shared-starfish-av-backend.md) and
 [validation and remaining coverage](pr136-local-validation.md).
 
 ## Rate transitions and return to Normal
 
-On the tested firmware, SetPlayRate flushes accepted compressed input. Calling
-it without replay data can leave the native decoder waiting for a keyframe.
-The adapter retains bounded audio/video histories and replays matching packets
-when changing speed. It preserves replay queues across backpressure and
-invalidates stale work when the session generation changes.
+The shared pipeline loads with `transmission:{"trickType":"client-side"}`,
+`seekMode:"keep-rate"` and `forcedPrerollOnPause:true`, matching the stock
+YouTube pipeline configuration on this firmware. With that configuration
+`SetPlayRate` changes the speed in place: accepted compressed input is not
+flushed, so no keyframe wait, replay or reload is needed. On the C1 the applied
+rate reaches the decoder and display within 6–19 ms in both directions while
+playing (1 → 1.75, 1.75 → 1, 0.5 → 1, 1.75 → 2, and rapid replacements).
+Exactly 1x is applied the same way; it is not a special case.
 
-Playing sessions and non-origin seeks require replay coverage, two frame
-callbacks, presentation at least 200 ms beyond the native target, accepted video
-at least one second ahead and audio at least 200 ms ahead. The adapter never
-forces a flushing transition on timeout. It keeps reporting the applied rate
-while waiting; pause reports zero. Forward native presentation extends the
-wait. Five seconds without forward presentation raises a decode error; a fully
-fed tail with established presentation instead finishes at the applied rate
-under the existing 20-second stall watchdog.
+Pause stops the decoder but keeps the applied rate. Firmware Play restores the
+previous trick speed (`VDISP_SetSpeed 0` then `1750`), so a rate selected while
+paused must not be assumed to have taken effect. The adapter therefore keeps
+the applied rate across Pause, defers a different request while paused, and
+issues `SetPlayRate` for the new rate immediately before Play on resume. Stock
+uses the same order and resumes at the requested rate.
 
-SetPlayRate(1.0) returns success on the tested firmware without restoring the
-audio decoder to Normal. Returning to exactly 1x therefore reloads at the
-presented position with a nearby retained video GOP and valid matching Opus
-plan. It never substitutes an approximate rate or reports an ineffective
-command as success. The reload can show a temporary black picture. Firmware
-Pause/Play also resets the decoder's rate, so resume reapplies the requested
-speed through the safe transition path.
+A rejected request is never reported as applied and never replays input the
+pipeline already consumed: the adapter keeps the old rate and retries the
+in-place call on the next worker step. Only a rejected Normal request uses the
+retained histories, reloading at the presented position with a nearby video GOP
+and valid matching Opus plan. The reload can show a temporary black picture.
+Five seconds without forward presentation raises a decode error; a fully fed
+tail with established presentation instead finishes at the applied rate under
+the existing 20-second stall watchdog.
 
 A terminal decode error requires Cobalt player recreation; clearing the
 adapter's error or seeking alone cannot reset PlayerWorker's error latch.
@@ -62,12 +65,10 @@ the reported target 2760.028160 s and audio timestamp 2759.994500 s, this gives
 
 A fresh stream-origin session prepares its requested rate while natively
 paused. Feed decoder initialization, wait for Load completion, apply the rate
-with replay coverage, then accept replay from both streams before first Play.
-This avoids briefly playing at 1x before flushing an already-running pipeline.
-The exception ends at first Play; later changes and non-origin seeks retain
-the presentation/headroom gate. No fixed startup delay forces the transition.
-The opt-in replay-disabled diagnostic path remains separate from this normal
-startup sequence and retains its existing empty-pipeline rate attempt.
+in place, then Play. This avoids briefly playing at 1x before changing an
+already-running pipeline. Later changes and non-origin seeks use the same
+in-place call; no gating or startup exception remains. No fixed startup delay
+forces the transition.
 
 Adaptive configuration overlap can independently block startup. Replacing an
 already selected SourceBuffer range may remove its selection after opening
@@ -83,8 +84,9 @@ presentation position while decoding preroll.
 
 YouTube probes a 60-fps source at 105 fps for 1.75x and 120 fps for 2x. The
 native 60-fps capability cap rejects these probes and Auto may choose 480p.
-The Cobalt-only YouTube TV preload normalizes recognized speed-scaled HD
-AV1/VP9 probes to their source frame rate before the native check. Codec,
+The Cobalt-only YouTube TV preload first preserves native acceptance. For a
+rejected HD AV1/VP9 probe, it checks both client speed values and corrects only
+an unambiguous recognized source frame rate before retrying the native check. Codec,
 dimensions, bitrate and color checks remain intact. UHD, AVC, unknown source
 frame rates, other browsers and other sites keep their native results. YouTube
 continues to control Auto selection and explicit quality preferences. C1 tests

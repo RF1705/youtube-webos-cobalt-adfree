@@ -46,6 +46,18 @@ export function normalizeSpeedCapabilityMime(mime, rate) {
   );
 }
 
+// Client speed values can briefly disagree during a change. Correct only when
+// the probe identifies one unambiguous source rate; never choose the larger
+// client value merely because it is larger.
+export function normalizeSpeedCapabilityProbe(mime, rates) {
+  const candidates = new Set(
+    rates
+      .map((rate) => normalizeSpeedCapabilityMime(mime, rate))
+      .filter((candidate) => candidate !== mime)
+  );
+  return candidates.size === 1 ? candidates.values().next().value : mime;
+}
+
 export function installPlaybackSpeedCapabilities(win) {
   if (
     !win ||
@@ -59,22 +71,20 @@ export function installPlaybackSpeedCapabilities(win) {
   }
   const original = win.MediaSource.isTypeSupported;
   function isTypeSupported(mime) {
-    let rate = 1;
+    const nativeResult = original.apply(this, arguments);
+    if (nativeResult) return nativeResult;
+    let rates = [];
     try {
       const video = win.document.querySelector('video');
       const player = win.document.getElementById(
         'ytlr-player__player-container-player'
       );
-      rate = Math.max(
-        video?.playbackRate || 1,
-        player?.getPlaybackRate?.() || 1
-      );
+      rates = [video?.playbackRate, player?.getPlaybackRate?.()];
     } catch (_) {
-      // Before the player exists, retain the native result.
+      return nativeResult;
     }
-    const normalized = normalizeSpeedCapabilityMime(mime, rate);
-    if (normalized === mime) return original.apply(this, arguments);
-    return original.call(this, normalized);
+    const normalized = normalizeSpeedCapabilityProbe(mime, rates);
+    return normalized === mime ? nativeResult : original.call(this, normalized);
   }
   try {
     win.MediaSource.isTypeSupported = isTypeSupported;

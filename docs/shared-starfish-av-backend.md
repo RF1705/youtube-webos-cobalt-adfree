@@ -37,35 +37,48 @@ one shape: the new session starts from a keyframe-anchored position and is
 primed with retained compressed packets.
 
 - **Seek**: the start is the snapped keyframe near the target (below).
-- **Rate change**: exactly `1.0` is the one rate this firmware cannot apply in
-  place. `StarfishMediaAPIs::SetPlayRate` parses `playRate` as a float,
-  range-checks it (-128..128) and returns true, but the pipeline treats 1.0 as
-  the default rate and never sets the audio decoder's `play-speed` property, so
-  `lxadec_set_play_speed` is not called and playback keeps its speed.
-  Fractional values do reach the decoder, downward included (1.75 -> 1.5 works),
-  and the direct LS2 route is closed (a `com.webos.media/setPlayRate` on this
-  unmanaged pipeline returns `returnValue: false`). Reaching exactly 1x
-  therefore reloads the native session at the presented position from the
+- **Rate change (fallback only)**: the pipeline loads with the stock trick-play
+  configuration (`transmission:{"trickType":"client-side"}`,
+  `seekMode:"keep-rate"`, `forcedPrerollOnPause:true`), so
+  `StarfishMediaAPIs::SetPlayRate` changes speed in place for every positive
+  rate, including exactly `1.0`. Measured on the C1, `VDISP_SetSpeed` and the
+  SOLA audio configuration follow the call within 6–19 ms while playing, with no
+  input flush, replay or reload. If the native call is rejected, a request for
+  Normal still reloads the native session at the presented position from the
   retained GOP, which starts at 1x. That costs one vendor pipeline reload
-  (~0.3 s of blank picture) per return to Normal; it is accepted over faking the
-  rate with 0.999, which would leave playback 0.1 % fast for the rest of the
-  video.
+  (~0.3 s of blank picture); it is accepted over faking the rate with 0.999,
+  which would leave playback 0.1 % fast for the rest of the video.
   A reload requires replay coverage, a presented frame, a valid Opus pre-roll
   plan, and a video keyframe within 1 s of the new start. If these are missing,
   the request stays pending while the existing session continues at its applied
-  speed; the bridge retries as new packets and keyframes arrive. It never falls
-  back to sending the ineffective `playRate: 1.0`, and never rewinds video without
-  matching retained audio. Forward native presentation extends the wait, so a long GOP at a slow applied
-  speed does not turn healthy playback into a terminal error. After 5 s without
-  forward presentation, the bridge reports an explicit decode error through the
-  existing player error callback. Cobalt requires player recreation after that
-  terminal error; a seek alone cannot clear its error latch. The applied rate is unchanged on failure.
+  speed; the bridge retries as new packets and keyframes arrive. It never
+  rewinds video without matching retained audio. Forward native presentation
+  extends the wait, so a long GOP at a slow applied speed does not turn healthy
+  playback into a terminal error. After 5 s without forward presentation, the
+  bridge reports an explicit decode error through the existing player error
+  callback. Cobalt requires player recreation after that terminal error; a seek
+  alone cannot clear its error latch. The applied rate is unchanged on failure.
 
-Other rate changes stay in the existing session and keep its exported window.
-Pending reload data is published, cancelled by seeks, and consumed under the
-owner mutex. Publication rechecks both the session generation and requested rate;
-session creation transfers the retained packets into local storage before
-releasing the mutex, so a concurrent seek cannot clear storage being moved.
+A successful in-place change stays in the existing session and keeps its
+exported window. The worker-owned `StarfishRateTransition` policy now runs only
+after a rejected native call: it chooses one explicit action: keep the applied
+rate, wait for safe input, reload for Normal, or fail after no forward progress. It owns no packets and makes no vendor calls. Readiness
+checks inspect retained coverage; owning replay snapshots are copied only when
+the policy permits a transition.
+
+Pause keeps the applied rate. Firmware Play restores the previous trick speed,
+so a request selected while paused is deferred and applied immediately before
+Play on resume.
+
+Rate changes, pause changes and seeks advance a request revision. A pending
+Normal reload packages its generation, revision, exact target and retained audio/
+video together. The worker claims it once through `TakeRateReload`, validating
+the revision immediately before committing to Unload. Withdrawing Normal,
+replacing a request (even back to the same numeric value), pausing or seeking
+before commitment cancels the queued reload. After commitment, later rate requests
+are handled by the replacement session; synchronous vendor calls cannot be
+cancelled halfway through Unload. A concurrent seek invalidates the generation
+without clearing packet storage already owned by the worker.
 
 ## Seek retarget
 
@@ -93,8 +106,8 @@ without silently skipping several seconds of content. With a snapped start,
 the chosen keyframe is fed first and
 `ptsToDecode` is set 100 ms
 after it, so the first native video frame precedes the native target by about
-100 ms. Audio keeps at most 100 ms of pre-roll before that keyframe, which holds
-the Opus pre-skip plan inside its 80 ms–1.365 s window, and native and audio
+100 ms. Audio keeps at most 100 ms of pre-roll before that keyframe, which keeps
+the Opus discard within its 16-bit sample limit, and native and audio
 timestamps keep the same epoch. The app-facing current time is the snapped
 start, within the accepted seek tolerance of the requested position. A seek that
 already restarts near its target keeps the previous behavior unchanged and
@@ -124,23 +137,25 @@ adaptive representation switch can leave Cobalt's video read pending even though
 the stream is buffered. The rate gate cannot fix missing demuxer output. See
 `docs/playback-rate-stall.md` for the root cause and the separate HD quality fix.
 
-Rate transitions on playing sessions and after seeks require replay coverage, at least two callbacks,
-presentation at least 200 ms beyond the native target, accepted video at least
-1 s ahead and audio at least 200 ms ahead. The old two-second forced transition
-has been removed. While waiting,
-the media-time provider reports the applied native rate, not the requested
-rate; pausing reports zero. A pending transition fails explicitly only after
-5 s without forward native presentation, rather than flushing unsafe input.
+Successful rate changes apply in place immediately on a loaded, playing
+session, including after a seek, with no coverage gates. The media-time
+provider reports the applied native rate, not the requested rate; pausing
+reports zero. Only a rejected Normal request publishes a reload, and that
+reload requires retained replay coverage plus a valid Opus restart plan from
+the presented position; it never replays into the live pipeline. Until the
+coverage exists the request stays pending and playback continues at the applied
+rate. It fails explicitly only after 5 s without forward native presentation.
 Fully fed tails with established presentation keep playing at the applied rate
-and finish via native EOS even when the headroom can never be satisfied; the
-existing 20 s stall watchdog remains active. Pausing clears the active wait;
-resuming and a different rate request each get a fresh deadline. The firmware's
-pause/reset behavior remains based on the C1 trace and needs other-device checks.
+and finish via native EOS; the existing 20 s stall watchdog remains active.
 
-Disabling replay is diagnostic only: a non-default rate may be attempted before
-the first feed on an empty pipeline, but post-feed changes still require safe
-coverage. With replay disabled, the request remains pending while presentation
-advances and fails explicitly if presentation stops for 5 s outside a fully fed tail. See
+Pause keeps the applied rate; Play restores the previous native trick speed.
+A rate selected while paused is therefore deferred, and resume sends
+`SetPlayRate` for the requested rate immediately before Play. The native
+behavior is measured on the C1 (`VDISP_SetSpeed 0` on pause, the previous
+speed on Play) and still needs other-device checks.
+
+Disabling replay is diagnostic only: it removes the Normal reload fallback and
+leaves the in-place retry, but never changes a successful rate transition. See
 `docs/pr136-local-validation.md` for host coverage and the remaining TV matrix.
 
 ## Verification and limits
@@ -170,8 +185,7 @@ wrap. A queued keyframe beyond the snap window ends scanning immediately when
 audio is available, preserving all packets for exact-target native-1x preroll.
 
 A fresh stream-origin session configures its initial speed while natively paused:
-feed decoder initialization, wait for native Load completion, set the requested
-rate with replay coverage, and accept replay from both streams before first
-Play. This avoids playing at 1x and then flushing an already-running pipeline.
-The exception ends at first Play; non-origin seeks and later changes retain the stronger
-presentation/headroom gate. There is no timeout that forces the initial rate.
+feed decoder initialization, wait for native Load completion, then apply the
+requested rate in place before first Play. This avoids playing at 1x and then
+changing an already-running pipeline. The startup case uses the same in-place
+path as later changes; there is no timeout that forces the initial rate.

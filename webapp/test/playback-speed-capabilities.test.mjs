@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   normalizeSpeedCapabilityMime,
+  normalizeSpeedCapabilityProbe,
   installPlaybackSpeedCapabilities
 } from '../src/playback-speed-capabilities.mjs';
 
@@ -79,9 +80,11 @@ test('hook uses pending player speed, preserves the receiver and installs once',
   assert.equal(installPlaybackSpeedCapabilities(win), true);
   assert.equal(installPlaybackSpeedCapabilities(win), false);
   assert.equal(win.MediaSource.isTypeSupported(hd), true);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0].receiver, win.MediaSource);
-  assert.equal(calls[0].mime, hd.replace('105', '60'));
+  assert.equal(calls[1].receiver, win.MediaSource);
+  assert.equal(calls[0].mime, hd);
+  assert.equal(calls[1].mime, hd.replace('105', '60'));
 });
 
 test('other browsers/sites and read-only native methods are untouched', () => {
@@ -107,4 +110,32 @@ test('other browsers/sites and read-only native methods are untouched', () => {
     assert.equal(installPlaybackSpeedCapabilities(win), false);
     assert.equal(win.MediaSource.isTypeSupported, original);
   }
+});
+
+test('disagreeing client rates support upward and downward speed changes', () => {
+  for (const [videoRate, playerRate] of [
+    [2, 1.75],
+    [1.75, 2]
+  ]) {
+    const { win, calls } = windowFixture();
+    win.document.querySelector = () => ({ playbackRate: videoRate });
+    win.document.getElementById = () => ({ getPlaybackRate: () => playerRate });
+    installPlaybackSpeedCapabilities(win);
+    assert.equal(win.MediaSource.isTypeSupported(hd), true);
+    assert.equal(calls.at(-1).mime, hd.replace('105', '60'));
+  }
+  // Both 60 fps at 1.5x and 50 fps at 1.8x explain this probe. Retain native.
+  const ambiguous = hd.replace('105', '90');
+  assert.equal(normalizeSpeedCapabilityProbe(ambiguous, [1.5, 1.8]), ambiguous);
+  assert.equal(normalizeSpeedCapabilityProbe(hd, [NaN, undefined]), hd);
+});
+
+test('native acceptance bypasses client-rate inspection and correction', () => {
+  const { win } = windowFixture();
+  win.MediaSource.isTypeSupported = () => true;
+  win.document.querySelector = () => {
+    throw new Error('must not inspect');
+  };
+  installPlaybackSpeedCapabilities(win);
+  assert.equal(win.MediaSource.isTypeSupported(hd), true);
 });

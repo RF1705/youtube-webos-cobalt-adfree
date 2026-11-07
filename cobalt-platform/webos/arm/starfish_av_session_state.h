@@ -317,7 +317,7 @@ class StarfishAvSessionState {
     return !failed_ && !eos_submitted_ && audio_.eos && video_.eos &&
            audio_.packets.empty() && video_.packets.empty();
   }
-  // A successful native flushing transition discards the native EOS marker.
+  // Creating a replacement session discards the native EOS marker.
   // Application queues and input EOS remain intact; submit again after replay.
   void NativeFlushed() { if (!ended_) eos_submitted_ = false; }
   bool EosSubmitted(uint64_t generation) {
@@ -378,18 +378,15 @@ constexpr int64_t kStarfishRateTransitionDeadlineUs = 5000000;
 // is not a usable restart: wait for a new GOP while the current session plays.
 inline bool PlanStarfishRateRestart(
     const StarfishOpusConfig& config, int64_t first_audio_us,
-    int64_t first_video_us, int64_t position_us, int64_t* restart_us,
+    int64_t first_video_us, int64_t position_us,
     StarfishOpusSessionPlan* plan) {
   const int64_t limit = std::numeric_limits<int64_t>::max() / 1000;
-  if (!restart_us || !plan || first_audio_us > position_us ||
+  if (!plan || first_audio_us > position_us ||
       first_audio_us < -limit || position_us < 0 || position_us > limit ||
       first_video_us < 0 || first_video_us > position_us) return false;
-  const int64_t target = position_us;
-  if (target - first_video_us > kStarfishSeekSnapWindowUs ||
-      !PlanStarfishOpusSession(config, first_audio_us, first_video_us,
-                               target, false, plan)) return false;
-  *restart_us = target;
-  return true;
+  return position_us - first_video_us <= kStarfishSeekSnapWindowUs &&
+      PlanStarfishOpusSession(config, first_audio_us, first_video_us,
+                             position_us, false, plan);
 }
 
 struct StarfishSeekRetargetResult {
@@ -509,12 +506,10 @@ class StarfishSeekRetarget {
   }
 
  private:
-  // Native start for a snapped seek: the 100 ms guard keeps the Opus pre-skip
-  // plan inside its 80 ms..1.365 s window and the keyframe just ahead of it.
+  // The caller selects audio at or after keyframe - preroll. Consequently the
+  // gap here is at most preroll + guard (200 ms), within the Opus discard limit.
   static int64_t StartFrom(int64_t keyframe_us, int64_t first_audio_us) {
-    int64_t start = std::max(keyframe_us, first_audio_us) + kStarfishSeekSnapGuardUs;
-    start = std::min(start, first_audio_us + 1365000);
-    return std::max(start, first_audio_us + 80000);
+    return std::max(keyframe_us, first_audio_us) + kStarfishSeekSnapGuardUs;
   }
 
   int64_t target_us_ = 0, started_us_ = 0, start_us_ = 0;

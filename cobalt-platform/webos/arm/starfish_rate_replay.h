@@ -43,14 +43,20 @@ class StarfishRateReplay {
     packets_.push_back({packet, keyframe});
     bytes_ += packet.bytes;
   }
-  bool Snapshot(int64_t current_us, std::deque<Entry>* result) {
+  // Inspect coverage without copying owning references on each worker tick.
+  bool Covers(int64_t current_us) {
     Prune(current_us);
-    result->clear();
     if (packets_.empty()) return false;
     if (video_ && (!packets_.front().keyframe ||
                   packets_.front().packet.pts_us > current_us)) return false;
     if (!video_ && (packets_.front().packet.pts_us > current_us ||
                     packets_.back().packet.pts_us < current_us - 100000)) return false;
+    return true;
+  }
+  int64_t first_pts() const { return packets_.front().packet.pts_us; }
+  bool Snapshot(int64_t current_us, std::deque<Entry>* result) {
+    result->clear();
+    if (!Covers(current_us)) return false;
     *result = packets_;
     return true;
   }

@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "starfish_av_session_state.h"
+#include "starfish_rate_transition.h"
 #include "starfish_audio_timing.h"
 #include "shared_av_experiment.h"
 #include "starfish_video_configuration.h"
@@ -30,6 +31,37 @@ using starboard::shared::webos::StarfishOpusSessionPlan;
 using starboard::shared::webos::StarfishVideoConfiguration;
 
 namespace {
+
+void TestRateTransitionPolicy() {
+  using Policy = starboard::shared::webos::StarfishRateTransition;
+  using Action = Policy::Action;
+  Policy policy;
+  Policy::Input in;
+  in.loaded = true; in.requested = 1.75; in.now_us = 100;
+  assert(policy.Decide(in) == Action::kWait);
+  in.now_us += 4000000;
+  assert(policy.Decide(in) == Action::kWait);
+  ++in.revision; // ABA request: same numeric rate, fresh no-progress deadline
+  assert(policy.Decide(in) == Action::kWait);
+  assert(policy.since_us() == in.now_us);
+  in.now_us += 5000000;
+  assert(policy.Decide(in) == Action::kFailNoProgress);
+  in.input_drained = in.presented = true;
+  assert(policy.Decide(in) == Action::kWait);
+  in.paused = true;
+  assert(policy.Decide(in) == Action::kKeep && !policy.waiting());
+  in.paused = false; in.input_drained = false;
+  in.presented = false;
+  // A rejected non-Normal request never replays: it stays pending and the
+  // worker retries the in-place call on the next step.
+  assert(policy.Decide(in) == Action::kWait);
+  in.applied = 1.75; in.requested = 1;
+  assert(policy.Decide(in) == Action::kWait); // Normal needs a valid reload plan
+  in.restart_usable = true;
+  assert(policy.Decide(in) == Action::kReloadNormal);
+  in.requested = in.applied;
+  assert(policy.Decide(in) == Action::kKeep);
+}
 
 void TestExperimentMode() {
   using starboard::shared::webos::ParseSharedAvBackendMode;
@@ -604,23 +636,24 @@ void TestKnownDistantNextKeyframe() {
 
 void TestRateRestartPlan() {
   StarfishOpusSessionPlan plan;
-  int64_t target = -1;
+  plan.target_native_us = -1;
   // Audio near the current position cannot support rewinding to an old GOP.
-  assert(!PlanStarfishRateRestart(Config(), 3900000, 0, 4000000, &target, &plan));
-  assert(target == -1);
-  assert(PlanStarfishRateRestart(Config(), 3900000, 4000000, 4000000, &target, &plan));
-  assert(target == 4000000 && plan.discard_samples == 4800);
+  assert(!PlanStarfishRateRestart(Config(), 3900000, 0, 4000000, &plan));
+  assert(plan.target_native_us == -1);
+  assert(PlanStarfishRateRestart(Config(), 3900000, 4000000, 4000000, &plan));
+  assert(plan.target_native_us == 4000000 && plan.discard_samples == 4800);
   // Preserve the exact position even when less preroll is available.
-  assert(PlanStarfishRateRestart(Config(), 3950000, 4000000, 4000000, &target, &plan));
-  assert(target == 4000000 && plan.discard_samples == 2400);
-  assert(!PlanStarfishRateRestart(Config(), 3900000, 4100000, 4000000, &target, &plan));
+  assert(PlanStarfishRateRestart(Config(), 3950000, 4000000, 4000000, &plan));
+  assert(plan.target_native_us == 4000000 && plan.discard_samples == 2400);
+  assert(!PlanStarfishRateRestart(Config(), 3900000, 4100000, 4000000, &plan));
   assert(!PlanStarfishRateRestart(Config(), std::numeric_limits<int64_t>::max(),
-                                 0, 4000000, &target, &plan));
+                                 0, 4000000, &plan));
 }
 
 }  // namespace
 
 int main() {
+  TestRateTransitionPolicy();
   TestExperimentMode();
   TestConfiguration();
   TestTiming();
