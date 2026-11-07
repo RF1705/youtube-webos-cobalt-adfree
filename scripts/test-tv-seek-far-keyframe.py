@@ -154,18 +154,20 @@ def main():
         return fail("no applied 1.75x evidence in this launch's native log")
     print("at 1.75x", flush=True)
 
-    before = log()
-    generation_before = max(
-        (int(value) for value in re.findall(r"generation=(\d+)", before)),
-        default=0,
-    )
-    seek_start = len(before)
+    # Do not assume the seek is generation_before + 1: an internal seek or a
+    # recreated player in the same launch can advance the counter first.
+    # Track the generation the seek itself reports in the new log slice.
+    seek_start = len(log())
     seek_forward(args.seek_presses)
 
+    seek_generation = None
     deadline = time.time() + 10
     while time.time() < deadline:
-        if "load generation=%d" % (generation_before + 1) in log()[seek_start:]:
-            break
+        seeks = re.findall(r"seek generation=(\d+)", log()[seek_start:])
+        if seeks:
+            seek_generation = int(seeks[-1])
+            if "load generation=%d" % seek_generation in log()[seek_start:]:
+                break
         time.sleep(0.5)
     else:
         return fail("no native Load after the seek")
