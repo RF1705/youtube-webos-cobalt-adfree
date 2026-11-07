@@ -6,7 +6,7 @@
 
 Unofficial Cobalt-based YouTube modification for LG webOS TVs with ad blocking and SponsorBlock support.
 
-The **v2.0.0 stable release** introduces the starterless Cobalt 2.x architecture. Read the [v2.0.0 release notes](docs/release-v2.0.0.md) for details.
+The **v2.0.1 stable release** improves playback speed switching, seeking and HD quality selection on LG webOS TVs. See the [v2.0.1 release](https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/tag/v2.0.1) for details. Version 2.0.0 introduced the starterless Cobalt 2.x architecture; see the [v2.0.0 release notes](docs/release-v2.0.0.md) for background.
 
 > This project is unofficial and is not affiliated with YouTube, Google, LG or webOS.
 
@@ -21,7 +21,7 @@ The **v2.0.0 stable release** introduces the starterless Cobalt 2.x architecture
 - SponsorBlock support
 - Return YouTube Dislike support
 - Automatic account selection on startup
-- Playback speed support
+- Smooth playback speed switching, including pause/resume and seeking
 - Optional Shorts visibility
 - Optional autostart integration
 - Native starterless Cobalt runtime without the legacy LG Cobalt starter binary
@@ -36,7 +36,7 @@ While a video is playing, press **1** to decrease playback speed or **3** to inc
 
 Download the stable `.ipk` from the [GitHub releases page](https://github.com/RF1705/youtube-webos-cobalt-adfree/releases/latest) and install it using Homebrew Channel, webOS Device Manager, `ares-cli`, or the webOS app install service on rooted devices.
 
-For **v2.0.0**, the package filename is `youtube.leanback.v4_2.0.0_arm.ipk`. It will become available once the stable release is published.
+For **v2.0.1**, the package filename is `youtube.leanback.v4_2.0.1_arm.ipk`.
 
 The package uses the original `youtube.leanback.v4` application id to preserve YouTube sign-in and phone pairing compatibility. Installing it replaces the official YouTube application.
 
