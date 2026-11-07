@@ -28,6 +28,7 @@ external_video_preroll_sync_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-we
 external_video_repeated_seek_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-webos-external-video-repeated-seek.patch"
 lifecycle_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-webos-lifecycle.patch"
 demuxer_stop_race_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-demuxer-stop-race.patch"
+video_config_overlap_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-webos-video-config-overlap.patch"
 microphone_patch="$repo_root/cobalt-platform/cobalt-23.lts.6-webos-microphone.patch"
 
 if ! git -C "$cobalt_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
@@ -181,6 +182,12 @@ if ! grep -q 'Ignore that stale callback before dereferencing its stream' \
   "$cobalt_root/cobalt/media/base/sbplayer_pipeline.cc"; then
   git -C "$cobalt_root" apply --check "$demuxer_stop_race_patch"
   git -C "$cobalt_root" apply "$demuxer_stop_race_patch"
+fi
+
+if ! grep -q 'An adaptive config change can replace the exhausted GOP' \
+  "$cobalt_root/third_party/chromium/media/filters/source_buffer_stream.cc"; then
+  git -C "$cobalt_root" apply --check "$video_config_overlap_patch"
+  git -C "$cobalt_root" apply "$video_config_overlap_patch"
 fi
 
 if ! grep -q 'LG voiceconductor supplies microphone' \
