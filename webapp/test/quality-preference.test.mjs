@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import {
   currentVideoId,
   installQualityPreference,
+  isCadenceOk,
+  pickSpeedAwareQualityLevel,
+  speedCapHeight,
   pickQualityLevel,
   qualityHeight
 } from '../src/quality-preference.mjs';
@@ -124,7 +127,8 @@ function createPlayer({
   levels = ['hd2160', 'hd1440', 'hd1080'],
   videoId = 'abc',
   live = false,
-  setters = true
+  setters = true,
+  fpsByHeight = null
 } = {}) {
   const player = {
     levels,
@@ -145,6 +149,18 @@ function createPlayer({
     },
     getPlaybackQuality() {
       return this.current;
+    },
+    getPlayerResponse() {
+      if (!fpsByHeight) return null;
+      return {
+        streamingData: {
+          adaptiveFormats: Object.entries(fpsByHeight).map(([height, fps]) => ({
+            qualityLabel: `${height}p`,
+            fps,
+            mimeType: 'video/mp4; codecs="av01.0.08M.08"'
+          }))
+        }
+      };
     }
   };
   if (setters) {
@@ -165,10 +181,19 @@ function createHarness(options = {}) {
   const player = createPlayer(options);
   const video = {
     readyState: 4,
+    playbackRate: options.rate ?? 1,
     currentTime: 0,
     duration: 100,
     paused: false,
-    error: null
+    error: null,
+    totalFrames: 0,
+    droppedFrames: 0,
+    getVideoPlaybackQuality() {
+      return {
+        totalVideoFrames: this.totalFrames,
+        droppedVideoFrames: this.droppedFrames
+      };
+    }
   };
   const doc = {
     ...eventTarget(),
@@ -213,6 +238,67 @@ function createHarness(options = {}) {
     }
   };
 }
+
+test('cadence fit requires the effective frame rate to divide the refresh', () => {
+  assert.equal(isCadenceOk(2160, 1.25, { 2160: 24 }), true);
+  assert.equal(isCadenceOk(2160, 1.75, { 2160: 24 }), false);
+  assert.equal(isCadenceOk(2160, 1.75, { 2160: 60 }), false);
+  assert.equal(isCadenceOk(2160, 1, { 2160: 60 }), true);
+  assert.equal(isCadenceOk(2160, 1.75, null), false);
+});
+
+test('cadence selection picks the highest level that fits, else the ceiling', () => {
+  const levels = ['hd2160', 'hd1440', 'hd1080'];
+  assert.equal(
+    pickSpeedAwareQualityLevel(levels, 'max', 1.25, { 2160: 24, 1440: 24, 1080: 24 }),
+    'hd2160'
+  );
+  assert.equal(
+    pickSpeedAwareQualityLevel(levels, 'max', 1.75, { 2160: 60, 1440: 60, 1080: 60 }),
+    'hd1440'
+  );
+  assert.equal(
+    pickSpeedAwareQualityLevel(levels, 'max', 2, { 2160: 60, 1440: 30, 1080: 30 }),
+    'hd1440'
+  );
+  assert.equal(pickSpeedAwareQualityLevel(levels, 'max', 1.75, null), 'hd1440');
+  assert.equal(
+    pickSpeedAwareQualityLevel(levels, '1080', 1, { 2160: 60, 1440: 60, 1080: 60 }),
+    'hd1080'
+  );
+});
+
+test('speed cap only applies to Highest from 1.5x', () => {
+  assert.equal(speedCapHeight(1), Infinity);
+  assert.equal(speedCapHeight(1.25), Infinity);
+  assert.equal(speedCapHeight(1.5), 1440);
+  assert.equal(speedCapHeight(1.75), 1440);
+  assert.equal(speedCapHeight(2), 1440);
+  const levels = ['hd2160', 'hd1440', 'hd1080'];
+  assert.equal(pickSpeedAwareQualityLevel(levels, '2160', 1.75, null), 'hd2160');
+});
+
+test('explicit preferences are not speed-capped or cadence-substituted', () => {
+  const levels = ['hd2160', 'hd1440', 'hd1080'];
+  assert.equal(
+    pickSpeedAwareQualityLevel(levels, '2160', 2, { 2160: 60, 1440: 30, 1080: 30 }),
+    'hd2160'
+  );
+  assert.equal(
+    pickSpeedAwareQualityLevel(levels, '1440', 2, { 2160: 60, 1440: 60, 1080: 30 }),
+    'hd1440'
+  );
+});
+
+test('controller picks a lower-fps rung that fits the speed cadence', () => {
+  const h = createHarness({
+    fpsByHeight: { 2160: 60, 1440: 30, 1080: 30 },
+    rate: 2
+  });
+  h.timers.advance(500);
+  assert.deepEqual(h.player.calls, [['range', 'hd1440', 'hd1440']]);
+  assert.equal(h.state().appliedTarget, 'hd1440');
+});
 
 test('applies the highest level once per video', () => {
   const h = createHarness();
@@ -285,6 +371,109 @@ test('stops trying when the player exposes no quality setter', () => {
   h.doc.dispatch('durationchange');
   h.timers.advance(1000);
   assert.equal(h.state().apiMissing, true);
+});
+
+test('re-pins the preferred level after a speed change drops it', () => {
+  const h = createHarness();
+  h.timers.advance(500);
+  assert.equal(h.player.calls.length, 1);
+  h.player.current = 'hd1080';
+  h.doc.dispatch('ratechange');
+  h.timers.advance(700);
+  assert.deepEqual(h.player.calls.at(-1), ['range', 'hd2160', 'hd2160']);
+});
+
+test('does not re-apply after a speed change when the level already matches', () => {
+  const h = createHarness();
+  h.timers.advance(500);
+  h.doc.dispatch('ratechange');
+  h.timers.advance(700);
+  assert.equal(h.player.calls.length, 1);
+});
+
+test('ignores speed changes while the preference is Auto', () => {
+  const h = createHarness({ preference: 'auto' });
+  h.timers.advance(500);
+  h.doc.dispatch('ratechange');
+  h.timers.advance(700);
+  assert.equal(h.player.calls.length, 0);
+});
+
+test('debounces rapid speed events into one re-pin', () => {
+  const h = createHarness();
+  h.timers.advance(500);
+  h.player.current = 'hd1080';
+  h.doc.dispatch('ratechange');
+  h.timers.advance(100);
+  h.doc.dispatch('ratechange');
+  h.timers.advance(700);
+  assert.equal(h.player.calls.length, 2);
+});
+
+test('never downgrades on a speed-change re-assert', () => {
+  const h = createHarness();
+  h.timers.advance(500);
+  assert.equal(h.player.calls.length, 1);
+  // The offered ladder briefly omits the rung that is still playing.
+  h.player.levels = ['hd1440', 'hd1080'];
+  h.doc.dispatch('ratechange');
+  h.timers.advance(3000);
+  assert.equal(h.player.calls.length, 1);
+  assert.equal(h.state().appliedTarget, 'hd2160');
+});
+
+test('catches a quality drop that lands after the first speed check', () => {
+  const h = createHarness();
+  h.timers.advance(500);
+  h.doc.dispatch('ratechange');
+  h.timers.advance(700);
+  assert.equal(h.player.calls.length, 1);
+  h.player.current = 'hd1080';
+  h.timers.advance(1500);
+  assert.deepEqual(h.player.calls.at(-1), ['range', 'hd2160', 'hd2160']);
+});
+
+test('does not re-pin a video that already fell back after a stall', () => {
+  const h = createHarness();
+  h.timers.advance(500);
+  h.video.currentTime = 10;
+  h.timers.advance(4000);
+  h.timers.advance(750);
+  assert.equal(h.state().failed, 1);
+  const calls = h.player.calls.length;
+  h.player.current = 'hd1080';
+  h.doc.dispatch('ratechange');
+  h.timers.advance(3000);
+  assert.equal(h.player.calls.length, calls);
+});
+
+test('steps down one level when dropped frames exceed the threshold', () => {
+  const h = createHarness();
+  h.timers.advance(500);
+  h.video.currentTime = 100;
+  h.timers.advance(4000);
+  h.video.currentTime = 101;
+  h.timers.advance(1000);
+  assert.equal(h.state().appliedTarget, 'hd2160');
+  h.video.totalFrames = 300;
+  h.video.droppedFrames = 30;
+  h.timers.advance(4000);
+  assert.deepEqual(h.player.calls.at(-1), ['range', 'hd1440', 'hd1440']);
+  assert.equal(h.state().appliedTarget, 'hd1440');
+});
+
+test('keeps the pinned level when dropped frames stay below the threshold', () => {
+  const h = createHarness();
+  h.timers.advance(500);
+  h.video.currentTime = 100;
+  h.timers.advance(4000);
+  h.video.currentTime = 101;
+  h.timers.advance(1000);
+  h.video.totalFrames = 300;
+  h.video.droppedFrames = 3;
+  h.timers.advance(4000);
+  assert.equal(h.player.calls.length, 1);
+  assert.equal(h.state().appliedTarget, 'hd2160');
 });
 
 test('reverts to Auto when a pinned level cannot present', () => {

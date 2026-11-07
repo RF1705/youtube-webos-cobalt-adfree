@@ -57,6 +57,7 @@ function getDescriptionDebugText(ryd) {
 }
 
 function buildDebugText() {
+  const quality = window.__ytafQualityPreference?.debugState?.();
   const sponsorBlock = window.sponsorblock;
   const ryd = window.returnYoutubeDislike;
   const video = document.querySelector('video');
@@ -89,28 +90,28 @@ function buildDebugText() {
     ...getDescriptionDebugText(ryd),
     row(
       'YP quality',
-      (() => {
-        const q = window.__ytafQualityPreference?.debugState?.();
-        if (!q) return 'controller not installed';
-        return `pref=${q.preference} target=${q.appliedTarget || 'n/a'} applied=${q.appliedFor || 'n/a'} failed=${q.failed} apiMissing=${q.apiMissing} retries=${q.retries}`;
-      })()
+      quality
+        ? `pref=${quality.preference} target=${quality.appliedTarget || 'n/a'} applied=${quality.appliedFor || 'n/a'} failed=${quality.failed} apiMissing=${quality.apiMissing} retries=${quality.retries}`
+        : 'controller not installed'
     ),
     row(
       'YP levels',
-      (() => {
-        const q = window.__ytafQualityPreference?.debugState?.();
-        if (!q) return 'n/a';
-        return `levels=${(q.levels || []).join(',') || 'none'} current=${q.current || 'n/a'} pid=${q.playerVideoId || 'n/a'} duration=${q.duration || 'n/a'}`;
-      })(),
+      quality
+        ? `levels=${(quality.levels || []).join(',') || 'none'} current=${quality.current || 'n/a'} pid=${quality.playerVideoId || 'n/a'} duration=${quality.duration || 'n/a'}`
+        : 'n/a',
       220
     ),
     row(
+      'YP fps',
+      quality && quality.fpsByHeight
+        ? Object.entries(quality.fpsByHeight).map(([h, f]) => `${h}:${f}`).join(',')
+        : 'none'
+    ),
+    row(
       'YP api',
-      (() => {
-        const q = window.__ytafQualityPreference?.debugState?.();
-        if (!q || !q.api) return 'player not found';
-        return `range=${q.api.range} single=${q.api.single} levels=${q.api.levels} current=${q.api.current}`;
-      })()
+      quality && quality.api
+        ? `range=${quality.api.range} single=${quality.api.single} levels=${quality.api.levels} current=${quality.api.current}`
+        : 'player not found'
     ),
     row('location', window.location.href, 180)
   ].join('\n');
