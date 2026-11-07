@@ -124,6 +124,13 @@ jobs:
         run: |
           set -euo pipefail
           test -f scripts/package-starterless-cobalt.sh
+          test -s LICENSES/README.md
+          test -s LICENSES/NOTICE.txt
+          test -s LICENSES/GPL-3.0.txt
+          test -s LICENSES/BSD-3-Clause.txt
+          test -s LICENSES/BSD-3-Clause-Cobalt.txt
+          test -s LICENSES/Zlib-SDL.txt
+          test -s LICENSES/GCC-exception-3.1.txt
           test -f scripts/normalize-ipk-ownership.py
           test -f scripts/verify-ipk-container.py
           test -f starterless-cobalt/appinfo.json
