@@ -1,0 +1,29 @@
+Third-party license notices — YouTube webOS Cobalt AdFree
+==========================================================
+
+This distribution combines separate works with different licenses. The
+license texts below are shipped alongside the executable at content/licenses/.
+
+* Project webapp: GPL-3.0-only (GPL-3.0.txt).
+* Project-owned native webOS Starboard integration: BSD-3-Clause
+  (BSD-3-Clause.txt), only for code owned by the project.
+* Cobalt/Chromium-derived runtime: upstream BSD-3-Clause notice
+  (BSD-3-Clause-Cobalt.txt) and any included Cobalt dependency notices.
+* Statically linked SDL-webOS 2.30.12: zlib license (Zlib-SDL.txt).
+  Copyright (C) 1997-2025 Sam Lantinga.
+* libstdc++.so.6, libgcc_s.so.1 and optional libatomic.so.1:
+  GNU GPL version 3 plus GCC Runtime Library Exception version 3.1,
+  subject to the per-file upstream licensing notices
+  (GPL-3.0.txt, GCC-exception-3.1.txt).
+* Optional libfdk-aac.so: preserve the runtime's original
+  content/licenses/fdk-aac.txt and the associated build metadata.
+
+Source code and changes:
+https://github.com/RF1705/youtube-webos-cobalt-adfree
+Cobalt: https://github.com/youtube/cobalt
+SDL-webOS: https://github.com/webosbrew/SDL-webOS
+GCC: https://gcc.gnu.org/
+
+Other upstream dependency licenses and platform-provided libraries remain
+subject to their own terms; this inventory is not a substitute for auditing
+the exact release artifact.
