@@ -15,7 +15,8 @@ const defaultConfig = {
   enableSponsorBlockHook: false,
   enableAutoLogin: true,
   enableReturnYouTubeDislike: true,
-  enableShorts: true
+  enableShorts: true,
+  qualityPreference: 'auto'
 };
 
 let localConfig = window.__ytafConfigState;

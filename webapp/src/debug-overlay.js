@@ -87,6 +87,31 @@ function buildDebugText() {
     row('RYD error', ryd?.fetchError),
     row('RYD body', ryd?.lastBody, 160),
     ...getDescriptionDebugText(ryd),
+    row(
+      'YP quality',
+      (() => {
+        const q = window.__ytafQualityPreference?.debugState?.();
+        if (!q) return 'controller not installed';
+        return `pref=${q.preference} target=${q.appliedTarget || 'n/a'} applied=${q.appliedFor || 'n/a'} failed=${q.failed} apiMissing=${q.apiMissing} retries=${q.retries}`;
+      })()
+    ),
+    row(
+      'YP levels',
+      (() => {
+        const q = window.__ytafQualityPreference?.debugState?.();
+        if (!q) return 'n/a';
+        return `levels=${(q.levels || []).join(',') || 'none'} current=${q.current || 'n/a'} pid=${q.playerVideoId || 'n/a'} duration=${q.duration || 'n/a'}`;
+      })(),
+      220
+    ),
+    row(
+      'YP api',
+      (() => {
+        const q = window.__ytafQualityPreference?.debugState?.();
+        if (!q || !q.api) return 'player not found';
+        return `range=${q.api.range} single=${q.api.single} levels=${q.api.levels} current=${q.api.current}`;
+      })()
+    ),
     row('location', window.location.href, 180)
   ].join('\n');
 }
