@@ -71,6 +71,19 @@ cp "$repo_root/starterless-cobalt/appinfo.json" "$package_root/appinfo.json"
 cp "$build_dir/cobalt" "$package_root/cobalt"
 cp -R "$build_dir/content" "$package_root/content"
 
+# Keep upstream notices and add repository/native/SDL/GCC license texts.
+# cp -R merges into content/licenses without deleting Cobalt/FDK notices.
+license_dir="$repo_root/LICENSES"
+for notice in README.md NOTICE.txt GPL-3.0.txt BSD-3-Clause.txt BSD-3-Clause-Cobalt.txt Zlib-SDL.txt GCC-exception-3.1.txt; do
+  if [[ ! -s "$license_dir/$notice" ]]; then
+    echo "Missing required license notice: $license_dir/$notice" >&2
+    exit 4
+  fi
+done
+mkdir -p "$package_root/content/licenses"
+cp -R "$license_dir/." "$package_root/content/licenses/"
+
+
 # Cobalt's bundled package contains only the stock-style Roboto/symbol subset.
 # Language, CJK and emoji fallback metadata points at webOS /usr/share/fonts.
 system_fonts_source="$repo_root/cobalt-platform/webos/system_fonts/fonts.xml"

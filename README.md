@@ -85,4 +85,4 @@ Compatibility depends on the webOS version, TV platform, firmware and Cobalt/Sta
 
 ## License
 
-See the repository license files for the licensing terms of the project and its components.
+This is a **multi-license project**. The webapp is GPL-3.0-only; project-owned native Starboard/webOS integration uses BSD-3-Clause; upstream Cobalt, SDL-webOS, GCC runtimes, and other dependencies keep their respective terms. See [license scope and third-party notices](LICENSES/README.md). Redistributed IPKs include the relevant license texts in `content/licenses/`.
