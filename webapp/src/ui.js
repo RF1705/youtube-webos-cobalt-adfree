@@ -276,6 +276,21 @@ export function userScriptStartUI() {
     )
   );
   uiContainer.appendChild(
+    choiceTools.add(
+      '__quality_preference',
+      text('qualityPreference'),
+      configRead('qualityPreference'),
+      [
+        { value: 'auto', label: text('qualityAuto') },
+        { value: 'max', label: text('qualityMax') },
+        { value: '2160', label: '2160p' },
+        { value: '1440', label: '1440p' },
+        { value: '1080', label: '1080p' }
+      ],
+      callbackConfig('qualityPreference')
+    )
+  );
+  uiContainer.appendChild(
     checkboxTools.add(
       '__auto_login',
       text('autoLogin'),
