@@ -5,7 +5,7 @@ seek preroll and adaptive representation changes. The rate model was verified
 against the stock YouTube Cobalt pipeline on the same firmware. These fixes
 were developed from LG C1 traces; other firmware still needs device validation.
 See [backend lifecycle](shared-starfish-av-backend.md) and
-[validation and remaining coverage](pr136-local-validation.md).
+[validation and remaining coverage](playback-rate-validation.md).
 
 ## Rate transitions and return to Normal
 
@@ -48,11 +48,12 @@ keyframes are limited to 900 ms to leave room for the 100 ms native-start guard.
 
 If no usable nearby start arrives within two seconds of the first queued video
 input, or a queued later keyframe proves the window cannot be satisfied, retain
-all packets and load
-the exact target at native 1x. The later rate change still waits for safe
-presentation and replay coverage. This fallback avoids discarding several
-seconds of content or failing an ordinary seek. The exported video window is
-armed during scanning so window setup can overlap that work.
+all packets and load the exact target at native 1x. Once that session is
+loaded, the requested rate is applied in place like any other change; only a
+rejected Normal request waits for retained coverage to reload. This fallback
+avoids discarding several seconds of content or failing an ordinary seek. The
+exported video window is armed during scanning so window setup can overlap
+that work.
 
 Chromium requests Opus preroll but clamps it to the available buffered range.
 The adapter calculates discard samples from the actual packet/target gap at

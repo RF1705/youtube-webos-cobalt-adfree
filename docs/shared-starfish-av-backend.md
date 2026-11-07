@@ -100,21 +100,20 @@ queued. Commit releases the skipped packets from the bridge queue in feed order
 keyframe; nothing is released before that, so a retarget that finds no usable
 keyframe within 2 s of the first video input keeps the exact requested target
 and loads the retained GOP at native 1x. No packets are released in this case.
-The rate transition stays gated until native presentation passes the target
-and accepted input has sufficient headroom. This avoids a fatal error/retry loop
-without silently skipping several seconds of content. With a snapped start,
-the chosen keyframe is fed first and
-`ptsToDecode` is set 100 ms
-after it, so the first native video frame precedes the native target by about
-100 ms. Audio keeps at most 100 ms of pre-roll before that keyframe, which keeps
-the Opus discard within its 16-bit sample limit, and native and audio
-timestamps keep the same epoch. The app-facing current time is the snapped
-start, within the accepted seek tolerance of the requested position. A seek that
-already restarts near its target keeps the previous behavior unchanged and
-releases nothing.
+Once loaded, the requested rate is applied in place like any other change;
+only a rejected Normal request waits for retained coverage to reload. This
+avoids a fatal error/retry loop without silently skipping several seconds of
+content. With a snapped start, the chosen keyframe is fed first and
+`ptsToDecode` is set 100 ms after it, so the first native video frame precedes
+the native target by about 100 ms. Audio keeps at most 100 ms of pre-roll
+before that keyframe, which keeps the Opus discard within its 16-bit sample
+limit, and native and audio timestamps keep the same epoch. The app-facing
+current time is the snapped start, within the accepted seek tolerance of the
+requested position. A seek that already restarts near its target keeps the
+previous behavior unchanged and releases nothing.
 
-A recreated session that a seek snapped starts native playback at 1x until the
-rate transition is safe to issue (see `docs/playback-rate-stall.md`). The
+A recreated session that a seek snapped starts native playback at 1x; the
+requested rate is applied in place once the session is loaded. The
 exported video window is armed while the retarget scans the GOP, so the ~0.5 s
 of SDL and compositor work overlaps the scan instead of delaying the first
 picture.
@@ -156,7 +155,7 @@ speed on Play) and still needs other-device checks.
 
 Disabling replay is diagnostic only: it removes the Normal reload fallback and
 leaves the in-place retry, but never changes a successful rate transition. See
-`docs/pr136-local-validation.md` for host coverage and the remaining TV matrix.
+`docs/playback-rate-validation.md` for host coverage and the remaining TV matrix.
 
 ## Verification and limits
 

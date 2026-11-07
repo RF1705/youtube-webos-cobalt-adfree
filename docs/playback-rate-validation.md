@@ -43,8 +43,7 @@ evidence outside the repository.
 The trusted native binary and preload are left installed with playback paused
 at verified Normal and the previous volume restored. The experimental candidate
 remains outside the repository. Neither instant recovery on rejected calls,
-zero dropped frames nor audible A/V synchronization is claimed. The changes
-remain local; no fresh CI result is claimed.
+zero dropped frames nor audible A/V synchronization is claimed.
 
 ## Host coverage
 
@@ -70,9 +69,12 @@ checks adapter decisions, ownership and call order, not firmware semantics.
 Native regressions, session-state checks with UBSan, bounded replay, the
 transition harness (including a transient-rejection regression that fails on
 the previous replaying fallback), all 34 frontend tests and the ARM build
-(`49bb4718…`) pass. Earlier
-validation of the unchanged SourceBuffer fix passed four actual ARM tests;
-three fail without the fix. Earlier device matrices add repeated-seek and Auto
+(`49bb4718…`) pass. CI runs the same host checks on every push, with UBSan
+enabled for the session-state test. Earlier validation of the unchanged
+SourceBuffer fix passed four actual ARM tests; three fail without the fix.
+That gtest (`webos_source_buffer_config_overlap_test`, added by the overlay
+patch) is built and run manually on the ARM Cobalt tree only; no CI job
+builds Cobalt. Earlier device matrices add repeated-seek and Auto
 1080p60 coverage, rather than a fresh run of every case on this binary.
 
 Run host checks from the repository root with a Linux toolchain:
@@ -86,8 +88,8 @@ c++ -std=c++14 -Wall -Wextra -Werror -I cobalt-platform/webos/arm \
   scripts/test-starfish-rate-replay.cc -o /tmp/rate-replay
 /tmp/rate-replay
 python3 scripts/test-starfish-rate-transition.py
+python3 -m py_compile scripts/test-tv-seek-far-keyframe.py
 (cd webapp && npm test && npm run build -- --env production --optimization-minimize)
-git diff --check
 ```
 
 ## Remaining device coverage

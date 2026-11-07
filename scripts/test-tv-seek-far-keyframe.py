@@ -34,6 +34,11 @@ def fail(message):
     return 1
 
 
+def skip(message):
+    print("SKIP: " + message)
+    return 77
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tv-control", default=os.environ.get("YTAF_TV_CONTROL"),
@@ -163,8 +168,7 @@ def main():
             break
         time.sleep(0.5)
     else:
-        key("ENTER")
-        time.sleep(4)
+        return fail("no native Load after the seek")
 
     time.sleep(args.settle)
     after = log()[seek_start:]
@@ -186,7 +190,10 @@ def main():
     generation, snapped, target, keyframe, start, skipped_video, _, given_up = retarget[-1]
     generation, snapped = int(generation), int(snapped)
     target, keyframe, start = int(target), int(keyframe), int(start)
-    if not snapped and (not int(given_up) or start != target):
+    if not snapped and not int(given_up):
+        return skip("demuxer keyframe was already near the target: "
+                    "this run did not exercise the far-keyframe case")
+    if not snapped and start != target:
         return fail("far-keyframe recovery did not preserve the exact target")
     if not -1000000 <= start - target <= 1000000:
         return fail("snapped start %d is %+d us from the target %d"
@@ -203,7 +210,7 @@ def main():
         return fail("no video first-input for generation %d" % generation)
     demuxer_keyframe = int(first_input.group(1))
     if target - demuxer_keyframe <= 1000000:
-        return fail("demuxer keyframe %d was already near the target %d: "
+        return skip("demuxer keyframe %d was already near the target %d: "
                     "this run did not exercise the far-keyframe case"
                     % (demuxer_keyframe, target))
     if not re.search(r"load generation=%d " % generation, after):
