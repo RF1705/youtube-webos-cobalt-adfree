@@ -15,6 +15,7 @@ import { userScriptStartShortsBlockUI } from './shorts-block.js';
 import { userScriptStartSponsorBlock } from './sponsorblock.js';
 import { userScriptStartReturnYouTubeDislike } from './returnyoutubedislike.js';
 import { resetAutoLogin } from './auto-login.js';
+import { startBackgroundAudioTest } from './background-audio-test.js';
 
 console.info('[ytaf] adblock-main.js LOADED, all imports successful');
 
@@ -106,6 +107,7 @@ export async function startUserScript() {
 
   try {
     userScriptStartUI();
+    startBackgroundAudioTest();
     userScriptStartShortsBlockUI();
     userScriptStartSponsoredQrCodeUI();
     startDebugOverlay();
