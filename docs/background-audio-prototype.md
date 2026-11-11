@@ -1,44 +1,44 @@
-# Background audio overlay experiment (Issue #143)
+# Native webOS Screen Off experiment (Issue #143)
 
-This is a **prototype**, not a working OLED panel power-off implementation.
+This test calls the **real webOS Luna tvpower API** from the native
+starterless-Cobalt SDL input loop. There is **no HTML black overlay**.
 
-## Motivation
+The [NicholasBly/youtube-webos](https://github.com/NicholasBly/youtube-webos)
+screensaver workaround adjusts video sizing; it does not implement this Luna
+screen power operation.
 
-The reference project [NicholasBly/youtube-webos](https://github.com/NicholasBly/youtube-webos)
-has a `src/screensaver-fix.js` module that adjusts video sizing and manages
-screensaver workarounds. It is **not** an implementation of the webOS Screen Off
-energy-saving command, so it cannot be copied for this feature.
+## Experiment
 
-Our starterless Cobalt build uses Starfish/native video planes. A fixed HTML
-overlay may cover the UI but **not** the decoded video plane. That is the
-first hypothesis to verify on an LG TV.
+- Blue remote key (mapped to `kSbKeyBlue`): request
+  `luna://com.webos.service.tvpower/power/turnOffScreen`.
+- Another blue key or an arrow/OK key: request
+  `luna://com.webos.service.tvpower/power/turnOnScreen`.
+- Volume and power keys do not trigger a wake request.
+- No media playback state is changed by this experiment.
+- The native app uses its existing libhelpers app-named Luna connection.
+  No root, extra service, or custom privilege escalation is added.
 
-## How to test
+## Test on the TV
 
-1. Build and install **this branch**, not `main`. The JS changes are bundled
-   into `adblockMain.js` as part of the existing starterless Cobalt build.
-2. Start a YouTube video or music stream with clearly audible audio.
-3. Briefly press the **blue remote button** (keycode 406; alias 191).
-4. Observe whether **both the UI and the actual video area** become black.
-   Keep listening: does audio continue?
-5. Change the volume while black; it should remain in the black-screen mode.
-6. Press an arrow or OK button: the screen should return and the key should
-   not accidentally control YouTube on that same press.
-7. Press blue again to toggle, and verify normal playback and navigation.
-8. Repeat after video changes and with different output modes/hardware.
+1. Build/install the starterless-Cobalt **IPK from this branch** (a webapp-only
+   build is insufficient because the change is in native C++).
+2. Play a music video or podcast and press the blue remote key briefly.
+3. Check whether the **physical panel** goes dark and sound continues.
+4. Press volume +/- (should remain dark); then press OK/arrow (should wake).
+5. Press blue again and repeat for another stream.
+6. Inspect Cobalt native logs for `[background-audio]` including the
+   `tvpower reply` JSON and errors.
 
-Logs are prefixed `[ytaf] Background audio`.
+## Interpretation
 
-## Known limitations
+- `tvpower request sent` means Luna accepted dispatch, **not** that the
+  screen actually switched off.
+- `tvpower reply` with `returnValue: false` / permission-denied means the
+  installed app cannot call that service with its current webOS permissions.
+- If native SDL does not receive the blue key or the call is blocked, record
+  the TV model, webOS version, and logs before changing implementation.
+- We intentionally avoid a silent black-screen fallback; this branch is
+  designed to determine whether **native Screen Off** is viable.
 
-- No direct `tvpower/turnOffScreen` Luna call and no privilege escalation.
-- The panel is **still powered on**. Do not claim power saving equivalent to
-  LG's real Screen Off feature.
-- The native Starfish video plane may remain visible over the black HTML layer.
-- This deliberately omits a long-press visualizer.
-- Remote key availability, repeat/keyup delivery, and native volume/power
-  handling must be validated on real hardware.
-
-If the native video remains visible, the next prototype should investigate a
-native webOS service call and its actual permissions, rather than hiding
-or pausing video and claiming screen-off support.
+This is untested on real LG hardware. A power-off request and subsequent
+screen-on request need to be verified before merging or shipping.
