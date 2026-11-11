@@ -4,6 +4,7 @@
 #include <SDL2/SDL_webOS.h>
 #include <appswitching-control-block/AcbAPI.h>
 #include <dlfcn.h>
+#include <luna-service2/lunaservice.h>
 #include <starfish-media-pipeline/StarfishMediaAPIs.h>
 
 #include <EGL/egl.h>
@@ -20,12 +21,54 @@
 #include "starboard/shared/starboard/audio_sink/audio_sink_internal.h"
 #include "starboard/webos/arm/sdl_wheel_input.h"
 #include "starboard/webos/arm/launch_parameters.h"
+#include "starboard/webos/arm/lg_native_bus.h"
 #include "starboard/webos/arm/window_internal.h"
 
 namespace starboard {
 namespace shared {
 namespace webos {
 namespace {
+
+// Issue #143: intentionally native, not a black HTML overlay.
+// Use the app-named Luna bus supplied by libhelpers. The TV may reject
+// tvpower commands based on its access policy; log the actual response.
+constexpr char kScreenOffUri[] =
+    "luna://com.webos.service.tvpower/power/turnOffScreen";
+constexpr char kScreenOnUri[] =
+    "luna://com.webos.service.tvpower/power/turnOnScreen";
+bool background_screen_off_requested = false;
+bool background_blue_held = false;
+
+bool ScreenPowerReply(LSHandle*, LSMessage* message, void*) {
+  const char* payload = LSMessageGetPayload(message);
+  SB_LOG(INFO) << "[background-audio] tvpower reply: "
+               << (payload ? payload : "(empty)");
+  return true;
+}
+
+bool RequestScreenPower(bool turn_off) {
+  LSHandle* bus = LgNativeAppBus();
+  if (!bus) {
+    SB_LOG(ERROR) << "[background-audio] No app Luna bus available";
+    return false;
+  }
+  LSError error;
+  LSErrorInit(&error);
+  LSMessageToken token = LSMESSAGE_TOKEN_INVALID;
+  const char* uri = turn_off ? kScreenOffUri : kScreenOnUri;
+  const bool sent = LSCallOneReply(bus, uri, "{}", ScreenPowerReply,
+                                   nullptr, &token, &error);
+  if (!sent) {
+    SB_LOG(ERROR) << "[background-audio] LSCallOneReply failed ("
+                  << (turn_off ? "off" : "on") << "): "
+                  << (error.message ? error.message : "unknown error");
+  } else {
+    SB_LOG(INFO) << "[background-audio] tvpower request sent: "
+                 << (turn_off ? "off" : "on");
+  }
+  LSErrorFree(&error);
+  return sent;
+}
 
 SbKey SdlKeyToSbKey(const SDL_Keysym& keysym) {
   switch (keysym.scancode) {
@@ -692,6 +735,29 @@ ApplicationSdl::Event* ApplicationSdl::TranslateEvent(const SDL_Event& event) {
   }
 
   if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+    const bool pressed = event.type == SDL_KEYDOWN;
+    const SbKey key = SdlKeyToSbKey(event.key.keysym);
+    if (key == kSbKeyBlue) {
+      if (!pressed) {
+        background_blue_held = false;
+      } else if (!background_blue_held && event.key.repeat == 0) {
+        background_blue_held = true;
+        // Only enter screen-off mode after a successfully dispatched
+        // request. Screen-off permission and playback are TV-side tests.
+        const bool next_off = !background_screen_off_requested;
+        if (RequestScreenPower(next_off))
+          background_screen_off_requested = next_off;
+      }
+      // Consume blue completely; YouTube must not react to this shortcut.
+      return nullptr;
+    }
+    if (pressed && background_screen_off_requested &&
+        key != kSbKeyVolumeUp && key != kSbKeyVolumeDown &&
+        key != kSbKeyVolumeMute && key != kSbKeyPower) {
+      // Consume the waking key so it cannot trigger a hidden YouTube action.
+      if (RequestScreenPower(false)) background_screen_off_requested = false;
+      return nullptr;
+    }
     SbInputData* data = new SbInputData();
     std::memset(data, 0, sizeof(*data));
     data->window = window_;
