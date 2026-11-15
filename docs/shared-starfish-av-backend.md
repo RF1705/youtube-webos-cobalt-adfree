@@ -2,9 +2,11 @@
 
 The webOS starterless Cobalt player now selects one native Starfish session and
 one presentation clock by default for eligible YouTube WebM Opus streams with
-H.264, VP9 or AV1 video. AAC, DRM, audio-only, unsupported codecs and unsupported
-configurations retain the existing Cobalt player factory. This change does not
-alter the platform's video capability advertisement or the standard-app build.
+H.264, VP9 or AV1 video, and for eligible YouTube MPEG-4 AAC streams (primarily
+livestreams) with the same video codecs. DRM, audio-only, unsupported codecs and
+unsupported configurations retain the existing Cobalt player factory. This
+change does not alter the platform's video capability advertisement or the
+standard-app build.
 
 The shared player owns both compressed-input queues, serializes vendor API calls
 on one thread, and uses native frame timestamps as Cobalt's media time. It
@@ -12,6 +14,51 @@ recreates both native streams on a seek, preserves compressed buffers across
 `BufferFull` retries, and distinguishes input EOS from native EOS. Normal WebM
 Opus end padding is accepted; Starfish has no per-packet back-clipping API, so
 the decoded tail may exceed the container end by at most one Opus packet.
+
+## AAC livestreams
+
+Livestreams are the one YouTube input that still used the legacy backend after
+the Opus shared session landed: YouTube serves AAC audio for live media, and
+the legacy path plays that audio through Cobalt's software decoder and
+PulseAudio while Starfish hardware-decodes the video. Those are two free-running
+clocks synchronized only at preroll, so device clock drift accumulates for the
+whole session and lipsync worsens over tens of minutes (audio ahead of video on
+the OLED C1 / webOS 6.5.3 device used for development).
+
+The shared session removes the second clock: AAC packets feed the same native
+Starfish session as the video, and the pipeline keeps A/V aligned internally by
+PTS. The AAC `AudioSpecificConfig` from the MSE demuxer flows through the
+existing `audio_specific_config` field — no WebM timing side data exists for
+AAC, and none is needed: the MSE demuxer trims encoder delay from the
+timestamps, so packet PTS is presentation time and the session plan is the
+epoch shift alone (`PlanStarfishAacSession`, `discard_samples == 0`).
+
+The native Load payload uses `aacInfo` with the ASC as its `streamHeader`
+(format AAC, profile, channels, frequency), verified against the firmware
+parser's acceptance on webOS 6.5.3. If a shared AAC session reports a decode
+error, the attempt is counted; after two consecutive failures the process
+falls back to the legacy backend for AAC players (the same path as before
+this change), and a session that ran healthy for over a minute resets the
+count. Opus playback is unaffected.
+
+FRAMEREADY also surfaces decode-ahead frames while the pipeline buffers a
+live stream. Cobalt's media time therefore follows a real-time projection of
+the presented position (the anchor advanced by the applied rate) instead of
+trusting every report; otherwise the webapp saw playback reach the buffered
+end and stopped appending segments, which starved live sessions into the 20 s
+stall watchdog.
+
+Validation on the OLED C1 / webOS 6.5.3 development device covered multi-hour
+1080p and 4K live sessions with pause/resume cycles and induced network
+throttling: the media time tracked the presented position at 1.001x with no
+stalls, and VOD playback was unchanged. Other webOS versions and SoCs have
+not been tested with AAC playback.
+
+Known residual difference from the Opus path: seek preroll. Opus feeds audio
+from ~100 ms before the snapped keyframe and trims the overlap through the
+patched pre-skip field. AAC has no per-packet back-clipping API, so a retargeted
+seek keeps audio from the same window and relies on the pipeline's internal PTS
+sync; the residual mismatch is bounded by the snap guard.
 
 ## Rollback and diagnostic modes
 
