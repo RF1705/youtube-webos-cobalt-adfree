@@ -39,6 +39,10 @@ using Stream = State::Stream;
 using Guard = std::lock_guard<std::mutex>;
 constexpr SbTime kPoll = 10000;
 constexpr SbTime kSecond = 1000000;
+// Headroom for the presentation-position advance clamp below: FRAMEREADY
+// cadence jitters, and a paused pipeline reports decode-ahead frames that
+// must not move Cobalt's media time at all.
+constexpr SbTime kStarfishPositionSlackUs = 500000;
 // 0 = available, 1 = owned, 2 = quarantined until process restart.
 std::atomic<int> lease{0};
 // AAC shared sessions that repeatedly fail natively stop trying: the legacy
@@ -280,6 +284,7 @@ struct NativeSession {
   unsigned seek_traces = 0;
   SbTime next_seek_trace = 0;
   int64_t rate_frame = -1, audio_pts = -1, video_pts = -1, keyframe_pts = -1;
+  SbTime next_position_trace = 0;
   uint64_t audio_limit_hits = 0, video_limit_hits = 0;
   std::atomic<uint64_t> frame_count{0}, event_count{0};
   std::atomic<int> last_event{0};
@@ -298,6 +303,12 @@ struct NativeSession {
   double rate = 1, volume = -1;
   SbTime created = SbTimeGetMonotonicNow(), last_play_attempt = 0;
   SbTime last_progress = created, last_frame = -1;
+  // Real-time projection anchor for Cobalt's media time: |position_anchor_us|
+  // is the presented position at |position_anchor_time|, advanced by the
+  // applied rate. FRAMEREADY that outruns the projection is decode-ahead.
+  SbTime position_anchor_us = 0, position_anchor_time = 0;
+  double applied_anchor_rate = 1;
+  bool position_anchor_paused = true;
   StarfishVideoConfiguration video_configuration;
   Backpressure audio_backpressure, video_backpressure;
   std::string applied_hdr_payload;
@@ -665,6 +676,13 @@ class Owner : public player::JobQueue::JobOwner {
       window_prearmed_ = true;
     }
     const SbTime now = SbTimeGetMonotonicNow();
+    // A shared AAC session that ran healthy for over a minute proves the
+    // backend works on this device; transient stalls must not downgrade the
+    // whole process to the legacy backend forever.
+    if (!audio_.is_opus && now - session->created > 60 * kSecond &&
+        session->frame_count.load() > 1) {
+      aac_shared_failures.store(0);
+    }
     const NativeSession::Backpressure& audio = session->audio_backpressure;
     const NativeSession::Backpressure& video = session->video_backpressure;
     const SbTime audio_active =
@@ -840,6 +858,10 @@ class Owner : public player::JobQueue::JobOwner {
     }
     std::unique_ptr<NativeSession> session(new NativeSession(generation));
     session->plan = plan;
+    session->position_anchor_us = current_;
+    session->position_anchor_time = SbTimeGetMonotonicNow();
+    session->applied_anchor_rate = 1;
+    session->position_anchor_paused = false;
     session->initial_play_pending = RateReplayEnabled() && !restart && origin &&
                                  target == 0 && first_video == 0;
     session->seek_progress = snapped;
@@ -1339,14 +1361,58 @@ class Owner : public player::JobQueue::JobOwner {
       RateSnapshot(session, "rate-progress");
       session.next_rate_trace = now + kSecond;
     }
+    // Devel-only drift diagnostics: one position snapshot per 10 s of
+    // playback. RateSnapshot covers current_, feed fronts and queue levels.
+    if (!paused && now >= session.next_position_trace) {
+      const bool first = session.next_position_trace == 0;
+      session.next_position_trace = now + 10 * kSecond;
+      if (!first) RateSnapshot(session, "position");
+    }
     bool submit_eos = false;
     {
       Guard guard(mutex_);
       if (state_.generation() != session.generation) return;
       playing_ = session.playing;
       applied_rate_ = session.rate;
+      if (paused != session.position_anchor_paused) {
+        // Pause freezes the presentation; resume re-anchors at the frozen
+        // position so the projection restarts from there at the new rate.
+        session.position_anchor_paused = paused;
+        session.applied_anchor_rate = session.rate;
+        session.position_anchor_us = current_;
+        session.position_anchor_time = now;
+      } else if (std::fabs(session.rate - session.applied_anchor_rate) > 0.0001) {
+        session.applied_anchor_rate = session.rate;
+        session.position_anchor_us = current_;
+        session.position_anchor_time = now;
+      }
       if (new_frame) {
-        current_ = std::max(current_, frame_ns / 1000 - session.plan.epoch_us);
+        // Cobalt's media time follows the real-time-projected presentation:
+        // the anchor position advanced by the applied rate, plus a small
+        // slack for FRAMEREADY cadence jitter. A paused pipeline presents
+        // nothing. FRAMEREADY also surfaces decode-ahead frames while the
+        // vendor pipeline buffers a live stream; letting those move the
+        // media time made the webapp stop appending segments (it saw the
+        // buffered end) and starved the session into the 20 s stall
+        // watchdog. Seeks set |current_| directly and re-anchor below.
+        const SbTime frame_position_us = frame_ns / 1000 - session.plan.epoch_us;
+        if (!paused) {
+          const SbTime expected_us = session.position_anchor_us +
+              static_cast<SbTime>((now - session.position_anchor_time) *
+                                  session.rate);
+          const SbTime bound = expected_us + kStarfishPositionSlackUs;
+          if (frame_position_us <= bound) {
+            // Real presentation evidence: trust it and re-anchor on it.
+            if (frame_position_us > current_) current_ = frame_position_us;
+            session.position_anchor_us = std::max(current_, frame_position_us);
+            session.position_anchor_time = now;
+          } else if (bound > current_) {
+            // Decode-ahead report: advance only to the projected bound.
+            current_ = bound;
+            session.position_anchor_us = bound;
+            session.position_anchor_time = now;
+          }
+        }
         have_frame_ = true; frame_time_ = now;
       }
       submit_eos = !session.replaying && state_.ReadyToSubmitEos();
