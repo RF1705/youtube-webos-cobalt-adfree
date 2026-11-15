@@ -27,7 +27,9 @@ using starboard::shared::webos::StarfishSeekRetargetResult;
 using starboard::shared::webos::StarfishSeekSnapCandidate;
 using starboard::shared::webos::StarfishSeekSnapDecision;
 using starboard::shared::webos::StarfishOpusConfig;
-using starboard::shared::webos::StarfishOpusSessionPlan;
+using starboard::shared::webos::StarfishSharedSessionPlan;
+using starboard::shared::webos::StarfishAacConfig;
+using starboard::shared::webos::PlanStarfishAacSession;
 using starboard::shared::webos::StarfishVideoConfiguration;
 
 namespace {
@@ -122,7 +124,7 @@ void TestConfiguration() {
 
 void TestTiming() {
   const auto original = Config();
-  StarfishOpusSessionPlan plan;
+  StarfishSharedSessionPlan plan;
   assert(PlanStarfishOpusSession(original, -6500, 0, 0, true, &plan));
   assert(plan.epoch_us == 6500 && plan.target_native_us == 6500);
   assert(plan.discard_samples == 312);
@@ -154,7 +156,7 @@ void TestTiming() {
     assert(plan.discard_samples == (pre_roll * 48 + 500) / 1000);
     assert(plan.epoch_us == 0 && plan.target_native_us == target);
     for (size_t i = 0; i < original.header.size(); ++i)
-      if (i != 10 && i != 11) assert(plan.config.header[i] == original.header[i]);
+      if (i != 10 && i != 11) assert(plan.opus.header[i] == original.header[i]);
     assert(plan.ToNativeNanoseconds(target - pre_roll, &audio_ns));
     assert(plan.ToNativeNanoseconds(target - 1000000, &video_ns));
     assert(audio_ns - video_ns == (1000000 - pre_roll) * 1000);
@@ -184,6 +186,88 @@ void TestTiming() {
   auto malformed = original;
   malformed.header[18] = 1;
   assert(!PlanStarfishOpusSession(malformed, -6500, 0, 0, true, &plan));
+}
+
+void TestAacConfigAndPlan() {
+  StarfishAacConfig config;
+  // AAC-LC, 48 kHz, stereo: the compact AudioSpecificConfig form.
+  const uint8_t lc_stereo_48k[2] = {0x11, 0x90};
+  assert(StarfishAacConfig::Parse(lc_stereo_48k, sizeof(lc_stereo_48k), &config));
+  assert(config.profile == 2 && config.sample_rate == 48000 &&
+         config.channels == 2);
+  assert(config.Matches(config));
+  StarfishAacConfig same;
+  assert(StarfishAacConfig::Parse(lc_stereo_48k, sizeof(lc_stereo_48k), &same));
+  assert(config.Matches(same));
+
+  // Cobalt carries the ASC in a 16-byte buffer padded with zeros (observed
+  // on live playback: AAC-LC 44.1 kHz stereo).
+  const uint8_t padded_lc_44k[16] = {0x12, 0x10};
+  assert(StarfishAacConfig::Parse(padded_lc_44k, sizeof(padded_lc_44k), &config));
+  assert(config.profile == 2 && config.sample_rate == 44100 &&
+         config.channels == 2 && config.asc[0] == 0x12 && config.asc[1] == 0x10);
+  StarfishAacConfig compact;
+  const uint8_t lc_44k[2] = {0x12, 0x10};
+  assert(StarfishAacConfig::Parse(lc_44k, sizeof(lc_44k), &compact));
+  assert(config.Matches(compact));  // padding must not change the config
+
+  StarfishAacConfig different;
+  const uint8_t lc_mono[2] = {0x12, 0x10 | 0x80};  // mono vs stereo
+  assert(StarfishAacConfig::Parse(lc_mono, sizeof(lc_mono), &different));
+  assert(!config.Matches(different));
+
+  assert(!StarfishAacConfig::Parse(nullptr, 2, &config));
+  assert(!StarfishAacConfig::Parse(lc_44k, 0, &config));
+  assert(!StarfishAacConfig::Parse(lc_44k, 17, &config));
+  // Non-zero padding is a real extended ASC, not Cobalt's zero padding.
+  const uint8_t extended[3] = {0x11, 0x90, 1};
+  assert(!StarfishAacConfig::Parse(extended, sizeof(extended), &config));
+  const uint8_t escape[2] = {0xF8, 0x00};  // object type 31 needs extension
+  assert(!StarfishAacConfig::Parse(escape, sizeof(escape), &config));
+  const uint8_t explicit_rate[2] = {0x0F, 0x00};  // rate index 15
+  assert(!StarfishAacConfig::Parse(explicit_rate, sizeof(explicit_rate), &config));
+  const uint8_t he_aac[2] = {0x28, 0x60};  // AOT 5 (HE): keep on the legacy path
+  assert(!StarfishAacConfig::Parse(he_aac, sizeof(he_aac), &config));
+  const uint8_t no_channels[2] = {0x10, 0x00};  // channel config 0
+  assert(!StarfishAacConfig::Parse(no_channels, sizeof(no_channels), &config));
+  assert(!StarfishAacConfig::Parse(lc_44k, sizeof(lc_44k), nullptr));
+
+  StarfishSharedSessionPlan plan;
+  assert(PlanStarfishAacSession(config, 0, 0, 0, &plan));
+  assert(!plan.is_opus && plan.discard_samples == 0);
+  assert(plan.epoch_us == 0 && plan.target_native_us == 0);
+  assert(plan.aac.profile == 2 && plan.aac.sample_rate == 44100);
+  int64_t audio_ns, video_ns;
+  assert(plan.ToNativeNanoseconds(0, &audio_ns) && audio_ns == 0);
+
+  // A preceding video keyframe sets the epoch exactly like the Opus plan.
+  assert(PlanStarfishAacSession(config, 0, -500000, 0, &plan));
+  assert(plan.epoch_us == 500000 && plan.target_native_us == 500000);
+  assert(plan.ToNativeNanoseconds(0, &audio_ns) && audio_ns == 500000000);
+  assert(plan.ToNativeNanoseconds(-500000, &video_ns) && video_ns == 0);
+
+  // Seek targets and non-zero starts keep the epoch math, discard stays zero.
+  assert(PlanStarfishAacSession(config, 100000, 100000, 200000, &plan));
+  assert(plan.discard_samples == 0 && plan.target_native_us == 200000);
+  assert(plan.ToNativeNanoseconds(100000, &audio_ns) && audio_ns == 100000000);
+  assert(plan.ToNativeNanoseconds(200000, &audio_ns) && audio_ns == 200000000);
+
+  assert(!PlanStarfishAacSession(config, 50000, 0, 20000, &plan));  // audio after target
+  assert(!PlanStarfishAacSession(config, -10000, 0, -1, &plan));
+  assert(!PlanStarfishAacSession(config, 0, 0, 0, nullptr));
+  StarfishAacConfig broken;
+  broken.profile = 0;
+  assert(!PlanStarfishAacSession(broken, 0, 0, 0, &plan));
+  const auto max = std::numeric_limits<int64_t>::max();
+  const auto min = std::numeric_limits<int64_t>::min();
+  assert(!PlanStarfishAacSession(config, min, 0, 0, &plan));
+  assert(!PlanStarfishAacSession(config, 0, max, 80000, &plan));
+  assert(!plan.ToNativeNanoseconds(max, &audio_ns));
+
+  // Rate restart overloads: same window rules, AAC variant plans without discard.
+  assert(PlanStarfishRateRestart(config, 100000, 150000, 200000, &plan));
+  assert(!plan.is_opus && plan.discard_samples == 0);
+  assert(!PlanStarfishRateRestart(config, 100000, 100000, 1000000 + 200000, &plan));
 }
 
 void TestCobaltAudioTiming() {
@@ -512,7 +596,7 @@ void TestSeekRetarget() {
   const long long gap_us = retarget.start_us() - audio_front.front().pts_us;
   const unsigned gap_samples =
       static_cast<unsigned>((gap_us * 48 + 500) / 1000);
-  StarfishOpusSessionPlan plan;
+  StarfishSharedSessionPlan plan;
   assert(PlanStarfishOpusSession(Config(), audio_front.front().pts_us,
                                 kNextKeyframeUs, retarget.start_us(), false,
                                 &plan));
@@ -604,7 +688,7 @@ void TestSeekRetargetBoundsAndReset() {
 }
 
 void TestShortPrerollPlan() {
-  StarfishOpusSessionPlan plan;
+  StarfishSharedSessionPlan plan;
   // Exact user-reported timestamps: the MSE audio range begins too late for
   // the full configured preroll. Discard 1616 samples, preserving the target.
   assert(PlanStarfishOpusSession(Config(),2759994500,2757708333,
@@ -635,7 +719,7 @@ void TestKnownDistantNextKeyframe() {
 }
 
 void TestRateRestartPlan() {
-  StarfishOpusSessionPlan plan;
+  StarfishSharedSessionPlan plan;
   plan.target_native_us = -1;
   // Audio near the current position cannot support rewinding to an old GOP.
   assert(!PlanStarfishRateRestart(Config(), 3900000, 0, 4000000, &plan));
@@ -657,6 +741,7 @@ int main() {
   TestExperimentMode();
   TestConfiguration();
   TestTiming();
+  TestAacConfigAndPlan();
   TestCobaltAudioTiming();
   TestVideoConfigurationTransitions();
   TestQueues();
