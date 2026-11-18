@@ -80,6 +80,22 @@ export function userScriptStartUI() {
     return 0;
   }
 
+  // Do not steal numeric input from Cobalt dialogs (e.g. parental PIN).
+  function isNumericInputContext(evt) {
+    const isEditable = (element) => Boolean(element && element.closest &&
+      element.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="spinbutton"]'));
+    if (isEditable(evt.target) || isEditable(document.activeElement)) return true;
+
+    // Cobalt can keep the video alive behind a modal. Only consider visible
+    // dialogs; hidden templates must not disable playback shortcuts.
+    return Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'))
+      .some((dialog) => {
+        const style = window.getComputedStyle(dialog);
+        return style.display !== 'none' && style.visibility !== 'hidden' &&
+          dialog.getClientRects().length > 0 && dialog.getAttribute('aria-hidden') !== 'true';
+      });
+  }
+
   function adjustPlaybackRate(direction) {
     const video = document.querySelector('video');
     if (!video) return false;
@@ -736,6 +752,7 @@ export function userScriptStartUI() {
       !evt.repeat &&
       !menuOpen &&
       playbackRateShortcut !== 0 &&
+      !isNumericInputContext(evt) &&
       adjustPlaybackRate(playbackRateShortcut)
     ) {
       evt.preventDefault();
