@@ -15,6 +15,7 @@ import { userScriptStartShortsBlockUI } from './shorts-block.js';
 import { userScriptStartSponsorBlock } from './sponsorblock.js';
 import { userScriptStartReturnYouTubeDislike } from './returnyoutubedislike.js';
 import { resetAutoLogin } from './auto-login.js';
+import { installQualityPreference } from './quality-preference.mjs';
 
 console.info('[ytaf] adblock-main.js LOADED, all imports successful');
 
@@ -108,6 +109,13 @@ export async function startUserScript() {
     userScriptStartUI();
     userScriptStartShortsBlockUI();
     userScriptStartSponsoredQrCodeUI();
+    if (
+      installQualityPreference(window, () =>
+        configRead('qualityPreference')
+      )
+    ) {
+      console.info('[ytaf] quality preference controller installed');
+    }
     startDebugOverlay();
     console.info('[ytaf] UI started');
   } catch (err) {

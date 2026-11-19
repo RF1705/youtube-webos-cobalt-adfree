@@ -22,6 +22,7 @@ The **v2.0.1 stable release** improves playback speed switching, seeking and HD 
 - Return YouTube Dislike support
 - Automatic account selection on startup
 - Smooth playback speed switching, including pause/resume and seeking
+- Optional playback quality preference (Auto, highest available, or a 2160p/1440p/1080p cap)
 - Optional Shorts visibility
 - Optional autostart integration
 - Native starterless Cobalt runtime without the legacy LG Cobalt starter binary
