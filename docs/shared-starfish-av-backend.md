@@ -38,15 +38,18 @@ The native Load payload uses `aacInfo` with the ASC as its `streamHeader`
 parser's acceptance on webOS 6.5.3. If a shared AAC session reports a decode
 error, the attempt is counted; after two consecutive failures the process
 falls back to the legacy backend for AAC players (the same path as before
-this change), and a session that ran healthy for over a minute resets the
-count. Opus playback is unaffected.
+this change). A session resets the count after a minute of accumulated
+presented-frame time while playing: wall time spent paused or buffering does
+not count. Opus playback is unaffected.
 
-FRAMEREADY also surfaces decode-ahead frames while the pipeline buffers a
-live stream. Cobalt's media time therefore follows a real-time projection of
-the presented position (the anchor advanced by the applied rate) instead of
-trusting every report; otherwise the webapp saw playback reach the buffered
-end and stopped appending segments, which starved live sessions into the 20 s
-stall watchdog.
+On AAC sessions, FRAMEREADY also surfaces decode-ahead frames while the
+pipeline buffers a live stream. Cobalt's media time therefore follows a
+real-time projection of the presented position (the anchor advanced by the
+applied rate) instead of trusting every report; otherwise the webapp saw
+playback reach the buffered end and stopped appending segments, which starved
+live sessions into the 20 s stall watchdog. This projection is scoped to AAC:
+Opus keeps its existing media clock, where every FRAMEREADY moves Cobalt's
+time, so its seeking, buffering and rate-transition timing is unchanged.
 
 Validation on the OLED C1 / webOS 6.5.3 development device covered multi-hour
 1080p and 4K live sessions with pause/resume cycles and induced network
