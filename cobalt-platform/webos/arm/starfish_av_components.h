@@ -10,8 +10,10 @@ namespace webos {
 // false: codec/configuration unsupported or rollback selected; use the existing
 // factory. true: shared path selected; a null result means an initialization
 // failure, NOT permission to start a competing native pipeline. Eligible WebM
-// Opus streams use this backend by default; YTAF_SHARED_AV=0 or a '0' in
-// /tmp/ytaf-shared-av.enable rolls back to the existing backend after restart.
+// Opus streams and MPEG-4 AAC streams (primarily livestreams) use this backend
+// by default; YTAF_SHARED_AV=0 or a '0' in /tmp/ytaf-shared-av.enable rolls
+// back to the existing backend after restart. AAC players whose native
+// sessions repeatedly failed fall back for the rest of the process.
 bool TryCreateStarfishAvComponents(
     const ::starboard::shared::starboard::player::filter::PlayerComponents::
         Factory::CreationParameters& parameters,

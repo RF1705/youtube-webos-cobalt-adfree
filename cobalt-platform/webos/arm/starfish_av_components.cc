@@ -39,8 +39,15 @@ using Stream = State::Stream;
 using Guard = std::lock_guard<std::mutex>;
 constexpr SbTime kPoll = 10000;
 constexpr SbTime kSecond = 1000000;
+// Slack for FRAMEREADY cadence jitter in the AAC presentation clamp below.
+constexpr SbTime kStarfishPositionSlackUs = 500000;
 // 0 = available, 1 = owned, 2 = quarantined until process restart.
 std::atomic<int> lease{0};
+// AAC shared sessions that repeatedly fail natively stop trying: the legacy
+// backend is today's proven path. Two attempts allow one transient failure
+// (e.g. a mid-stream representation switch) without a retry loop.
+std::atomic<int> aac_shared_failures{0};
+constexpr int kMaxAacSharedFailures = 2;
 std::atomic<unsigned> trace_info_count{0};
 std::atomic<unsigned> trace_essential_count{0};
 bool TraceAllowed(bool essential) {
@@ -226,16 +233,16 @@ std::string BuildHdrInfoPayload(const SbMediaColorMetadata& metadata) {
   return payload.str();
 }
 
-std::string Base64(const std::array<uint8_t, 19>& data) {
+std::string Base64(const uint8_t* data, size_t size) {
   const char* alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   std::string out;
-  for (size_t i = 0; i < data.size(); i += 3) {
+  for (size_t i = 0; i < size; i += 3) {
     const unsigned bits = (unsigned(data[i]) << 16) |
-        (i + 1 < data.size() ? unsigned(data[i + 1]) << 8 : 0) |
-        (i + 2 < data.size() ? data[i + 2] : 0);
+        (i + 1 < size ? unsigned(data[i + 1]) << 8 : 0) |
+        (i + 2 < size ? data[i + 2] : 0);
     out += alphabet[(bits >> 18) & 63]; out += alphabet[(bits >> 12) & 63];
-    out += i + 1 < data.size() ? alphabet[(bits >> 6) & 63] : '=';
-    out += i + 2 < data.size() ? alphabet[bits & 63] : '=';
+    out += i + 1 < size ? alphabet[(bits >> 6) & 63] : '=';
+    out += i + 2 < size ? alphabet[bits & 63] : '=';
   }
   return out;
 }
@@ -275,6 +282,9 @@ struct NativeSession {
   unsigned seek_traces = 0;
   SbTime next_seek_trace = 0;
   int64_t rate_frame = -1, audio_pts = -1, video_pts = -1, keyframe_pts = -1;
+  SbTime next_position_trace = 0;
+  // Presented-frame time while playing; gates the AAC downgrade reset.
+  SbTime healthy_playback_us = 0, last_healthy_frame = -1;
   uint64_t audio_limit_hits = 0, video_limit_hits = 0;
   std::atomic<uint64_t> frame_count{0}, event_count{0};
   std::atomic<int> last_event{0};
@@ -287,12 +297,18 @@ struct NativeSession {
   std::atomic<int> error_type{0};
   std::atomic<int64_t> error_value{0};
   std::unique_ptr<StarfishMediaAPIs> api;
-  StarfishOpusSessionPlan plan;
+  StarfishSharedSessionPlan plan;
   bool window = false, audio_fed = false, video_fed = false;
   bool playing = false, was_loaded = false;
   double rate = 1, volume = -1;
   SbTime created = SbTimeGetMonotonicNow(), last_play_attempt = 0;
   SbTime last_progress = created, last_frame = -1;
+  // Real-time projection anchor for Cobalt's media time: |position_anchor_us|
+  // is the presented position at |position_anchor_time|, advanced by the
+  // applied rate. FRAMEREADY that outruns the projection is decode-ahead.
+  SbTime position_anchor_us = 0, position_anchor_time = 0;
+  double applied_anchor_rate = 1;
+  bool position_anchor_paused = true;
   StarfishVideoConfiguration video_configuration;
   Backpressure audio_backpressure, video_backpressure;
   std::string applied_hdr_payload;
@@ -331,11 +347,20 @@ struct RateReload {
   std::deque<NativeSession::Replay::Entry> audio, video;
 };
 
+// The shared session's audio selection, validated at factory time. The worker
+// branches on |is_opus| only where the codecs differ: Opus carries timing side
+// data and a pre-skip plan; AAC raw frames carry neither.
+struct SharedAudioSelection {
+  bool is_opus = true;
+  StarfishOpusConfig opus;
+  StarfishAacConfig aac;
+};
+
 class Owner : public player::JobQueue::JobOwner {
  public:
   Owner(const filter::PlayerComponents::Factory::CreationParameters& parameters,
-        const StarfishOpusConfig& config, int mode)
-      : player_(parameters.player()), config_(config),
+        const SharedAudioSelection& audio, int mode)
+      : player_(parameters.player()), audio_(audio),
         video_codec_(parameters.video_codec()), mode_(mode),
         // The video budget covers one held GOP during a seek retarget; normal
         // playback keeps the much smaller CanAccept() thresholds.
@@ -381,33 +406,47 @@ class Owner : public player::JobQueue::JobOwner {
       }
       if (stream == Stream::kAudio) {
         const auto& info = buffer->audio_sample_info();
-        StarfishOpusConfig config;
-        StarfishAudioTiming timing;
-        const auto& wire = buffer->webos_audio_timing();
-        if (info.codec != kSbMediaAudioCodecOpus ||
-            !StarfishOpusConfig::Parse(info.audio_specific_config,
-                info.audio_specific_config_size, info.number_of_channels,
-                info.samples_per_second, &config) || config.header != config_.header ||
-            !StarfishAudioTiming::Decode(wire.data(), wire.size(), &timing)) {
-          FailLocked(FormatString("unsupported/missing Opus config or timing side data (size=%zu)", wire.size()));
-          return;
+        if (audio_.is_opus) {
+          StarfishOpusConfig config;
+          StarfishAudioTiming timing;
+          const auto& wire = buffer->webos_audio_timing();
+          if (info.codec != kSbMediaAudioCodecOpus ||
+              !StarfishOpusConfig::Parse(info.audio_specific_config,
+                  info.audio_specific_config_size, info.number_of_channels,
+                  info.samples_per_second, &config) ||
+              config.header != audio_.opus.header ||
+              !StarfishAudioTiming::Decode(wire.data(), wire.size(), &timing)) {
+            FailLocked(FormatString("unsupported/missing Opus config or timing side data (size=%zu)", wire.size()));
+            return;
+          }
+          if (!ResolveStarfishOpusPacketTime(audio_.opus, timing, pts, &pts)) {
+            FailLocked(FormatString("unsupported Opus timing: pts=%lld delay=%lld head=%u front=%lld back=%lld duration=%lld preroll=%lld",
+                static_cast<long long>(pts), static_cast<long long>(timing.codec_delay_samples),
+                audio_.opus.pre_skip_samples(), static_cast<long long>(timing.discard_front_us),
+                static_cast<long long>(timing.discard_back_us), static_cast<long long>(timing.duration_us),
+                static_cast<long long>(timing.seek_preroll_us)));
+            return;
+          }
+          if (timing.discard_back_us > 0) {
+            Trace("accepting Opus end padding without native clipping: back_us=%lld duration_us=%lld",
+                  static_cast<long long>(timing.discard_back_us),
+                  static_cast<long long>(timing.duration_us));
+          }
+          // WebM block PTS and MSE timestampOffset remain in the container
+          // timeline. Codec delay is separate; convert BOTH seek planning and
+          // subsequent audio Feed timestamps, not just the first packet.
+        } else {
+          StarfishAacConfig config;
+          if (info.codec != kSbMediaAudioCodecAac ||
+              !StarfishAacConfig::Parse(info.audio_specific_config,
+                  info.audio_specific_config_size, &config) ||
+              !config.Matches(audio_.aac)) {
+            FailLocked(FormatString("unsupported/changed AAC config (size=%zu)",
+                info.audio_specific_config_size));
+            return;
+          }
+          // Raw AAC frames carry no container delay: PTS is presentation time.
         }
-        if (!ResolveStarfishOpusPacketTime(config_, timing, pts, &pts)) {
-          FailLocked(FormatString("unsupported Opus timing: pts=%lld delay=%lld head=%u front=%lld back=%lld duration=%lld preroll=%lld",
-              static_cast<long long>(pts), static_cast<long long>(timing.codec_delay_samples),
-              config_.pre_skip_samples(), static_cast<long long>(timing.discard_front_us),
-              static_cast<long long>(timing.discard_back_us), static_cast<long long>(timing.duration_us),
-              static_cast<long long>(timing.seek_preroll_us)));
-          return;
-        }
-        if (timing.discard_back_us > 0) {
-          Trace("accepting Opus end padding without native clipping: back_us=%lld duration_us=%lld",
-                static_cast<long long>(timing.discard_back_us),
-                static_cast<long long>(timing.duration_us));
-        }
-        // WebM block PTS and MSE timestampOffset remain in the container
-        // timeline. Codec delay is separate; convert BOTH seek planning and
-        // subsequent audio Feed timestamps, not just the first packet.
       } else {
         const auto& info = buffer->video_sample_info();
         if (info.codec != video_codec_ ||
@@ -599,6 +638,7 @@ class Owner : public player::JobQueue::JobOwner {
     Schedule([this] { PollWorker(); }, kPoll);
     if (error) {
       TraceEssential("error: %s", message.c_str());
+      if (!audio_.is_opus) aac_shared_failures.fetch_add(1);
       error(kSbPlayerErrorDecode, message); return;
     }
     if (audio_preroll) audio_preroll();
@@ -633,6 +673,11 @@ class Owner : public player::JobQueue::JobOwner {
       window_prearmed_ = true;
     }
     const SbTime now = SbTimeGetMonotonicNow();
+    // A minute of presented frames proves the backend works on this device;
+    // paused or buffering wall time must not reset the downgrade latch.
+    if (!audio_.is_opus && session->healthy_playback_us > 60 * kSecond) {
+      aac_shared_failures.store(0);
+    }
     const NativeSession::Backpressure& audio = session->audio_backpressure;
     const NativeSession::Backpressure& video = session->video_backpressure;
     const SbTime audio_active =
@@ -748,7 +793,7 @@ class Owner : public player::JobQueue::JobOwner {
   // and its window.
   std::unique_ptr<NativeSession> Start(uint64_t generation,
                                        std::unique_ptr<RateReload> reload = nullptr) {
-    StarfishOpusSessionPlan plan;
+    StarfishSharedSessionPlan plan;
     SbTime target, first_audio, first_video;
     int width, height;
     unsigned bits;
@@ -762,7 +807,7 @@ class Owner : public player::JobQueue::JobOwner {
       origin = audio_origin_;
       // Ownership of a pre-armed window transfers to the session only once the
       // session exists; clearing the flag earlier would orphan it whenever the
-      // Opus plan below rejects the start.
+      // plan below rejects the start.
       prearmed = window_prearmed_;
       restart = bool(reload);
       if (restart) {
@@ -771,8 +816,12 @@ class Owner : public player::JobQueue::JobOwner {
         first_audio = reload->audio.front().packet.pts_us;
         first_video = reload->video.front().packet.pts_us;
         target = reload->target;
-        if (!PlanStarfishRateRestart(config_, first_audio, first_video,
-                                    target, &plan)) {
+        const bool planned = audio_.is_opus
+            ? PlanStarfishRateRestart(audio_.opus, first_audio, first_video,
+                                      target, &plan)
+            : PlanStarfishRateRestart(audio_.aac, first_audio, first_video,
+                                      target, &plan);
+        if (!planned) {
           FailLocked("invalid shared A/V rate restart");
           return nullptr;
         }
@@ -781,11 +830,16 @@ class Owner : public player::JobQueue::JobOwner {
         first_audio = first_audio_pts_; first_video = first_video_pts_;
       }
       width = width_; height = height_; bits = video_bits_; hdr = video_hdr_;
-      if (!restart && !PlanStarfishOpusSession(
-                          config_, first_audio, first_video, target,
-                          audio_origin_, &plan)) {
-        FailLocked("cannot plan shared Opus restart: timestamp/pre-roll outside supported range");
-        return nullptr;
+      if (!restart) {
+        const bool planned = audio_.is_opus
+            ? PlanStarfishOpusSession(audio_.opus, first_audio, first_video,
+                                      target, audio_origin_, &plan)
+            : PlanStarfishAacSession(audio_.aac, first_audio, first_video,
+                                     target, &plan);
+        if (!planned) {
+          FailLocked("cannot plan shared session restart: timestamp/pre-roll outside supported range");
+          return nullptr;
+        }
       }
       current_ = target;
       applied_rate_ = 1;
@@ -799,6 +853,10 @@ class Owner : public player::JobQueue::JobOwner {
     }
     std::unique_ptr<NativeSession> session(new NativeSession(generation));
     session->plan = plan;
+    session->position_anchor_us = current_;
+    session->position_anchor_time = SbTimeGetMonotonicNow();
+    session->applied_anchor_rate = 1;
+    session->position_anchor_paused = false;
     session->initial_play_pending = RateReplayEnabled() && !restart && origin &&
                                  target == 0 && first_video == 0;
     session->seek_progress = snapped;
@@ -855,14 +913,30 @@ class Owner : public player::JobQueue::JobOwner {
     const int max_width = video_codec_ == kSbMediaVideoCodecH264 ? 1920 : 3840;
     const int max_height = video_codec_ == kSbMediaVideoCodecH264 ? 1080 : 2160;
     // Window ID is generated by SDL; app ID stays fixed, not unescaped input.
+    // Audio config: Opus feeds its patched OpusHead through opusInfo; AAC
+    // feeds the AudioSpecificConfig through aacInfo (verified on webOS 6.5.3).
+    // Either field closes the externalStreamingInfo contents object.
+    std::string audio_codec_field;
+    if (audio_.is_opus) {
+      audio_codec_field = FormatString(
+          "\"opusInfo\":{\"channels\":%u,\"sampleRate\":48,\"streamHeader\":\"%s\"}},",
+          unsigned(plan.opus.header[9]),
+          Base64(plan.opus.header.data(), plan.opus.header.size()).c_str());
+    } else {
+      audio_codec_field = FormatString(
+          "\"aacInfo\":{\"format\":\"AAC\",\"channels\":%u,\"frequency\":%u,"
+          "\"profile\":%u,\"streamHeader\":\"%s\"}},",
+          plan.aac.channels, plan.aac.sample_rate, plan.aac.profile,
+          Base64(plan.aac.asc.data(), plan.aac.asc.size()).c_str());
+    }
     const std::string payload = FormatString(
         "{\"args\":[{\"mediaTransportType\":\"BUFFERSTREAM\",\"option\":{"
         "\"appId\":\"youtube.leanback.v4\",%s\"queryPosition\":false,"
         "\"externalStreamingInfo\":{\"contents\":{\"format\":\"RAW\",\"provider\":\"Chrome\","
-        "\"codec\":{\"video\":\"%s\",\"audio\":\"OPUS\"},"
+        "\"codec\":{\"video\":\"%s\",\"audio\":\"%s\"},"
         "\"esInfo\":{\"pauseAtDecodeTime\":false,\"seperatedPTS\":true,\"ptsToDecode\":%lld,"
         "\"videoWidth\":%d,\"videoHeight\":%d,\"videoFpsValue\":60,\"videoFpsScale\":1},"
-        "\"opusInfo\":{\"channels\":%u,\"sampleRate\":48,\"streamHeader\":\"%s\"}},"
+        "%s"
         "\"restartStreaming\":false,\"totalStreamSize\":256,\"bufferingCtrInfo\":{"
         "\"srcBufferLevelAudio\":{\"minimum\":1024,\"maximum\":1048576},"
         "\"srcBufferLevelVideo\":{\"minimum\":1024,\"maximum\":8388608}}},"
@@ -873,8 +947,9 @@ class Owner : public player::JobQueue::JobOwner {
         "\"forcedPrerollOnPause\":true,\"seekMode\":\"keep-rate\","
         "\"transmission\":{\"trickType\":\"client-side\"}}}]}",
         window_field.c_str(), codec_name,
+        audio_.is_opus ? "OPUS" : "AAC",
         static_cast<long long>(plan.target_native_us * 1000), width, height,
-        unsigned(config_.header[9]), Base64(plan.config.header).c_str(),
+        audio_codec_field.c_str(),
         max_width, max_height);
     Trace("load generation=%llu codec=%s size=%dx%d bits=%u hdr=%d target_us=%lld audio_us=%lld video_us=%lld epoch_us=%lld discard_samples=%u",
           static_cast<unsigned long long>(generation), codec_name, width, height, bits, hdr,
@@ -1092,10 +1167,17 @@ class Owner : public player::JobQueue::JobOwner {
         audio_ok = session.audio_history.Covers(position);
         video_ok = session.video_history.Covers(position);
         const bool replay_ok = audio_ok && video_ok && RateReplayEnabled();
-        StarfishOpusSessionPlan plan;
+        StarfishSharedSessionPlan plan;
         input.restart_usable = replay_ok && std::fabs(rate - 1) < 0.0001 &&
-            PlanStarfishRateRestart(config_, session.audio_history.first_pts(),
-                                    session.video_history.first_pts(), position, &plan);
+            (audio_.is_opus
+                 ? PlanStarfishRateRestart(audio_.opus,
+                                           session.audio_history.first_pts(),
+                                           session.video_history.first_pts(),
+                                           position, &plan)
+                 : PlanStarfishRateRestart(audio_.aac,
+                                           session.audio_history.first_pts(),
+                                           session.video_history.first_pts(),
+                                           position, &plan));
       }
     }
     const bool was_waiting = session.rate_transition.waiting();
@@ -1254,6 +1336,15 @@ class Owner : public player::JobQueue::JobOwner {
         Trace("first-frame generation=%llu native_ns=%lld presentation_us=%lld",
               static_cast<unsigned long long>(session.generation), static_cast<long long>(frame_ns),
               static_cast<long long>(frame_ns / 1000 - session.plan.epoch_us));
+      // Credit only time between presented frames while playing: pause and
+      // buffering gaps must not reset the AAC downgrade latch.
+      if (!audio_.is_opus && !paused) {
+        if (session.last_healthy_frame >= 0) {
+          const SbTime gap = now - session.last_healthy_frame;
+          if (gap <= kSecond) session.healthy_playback_us += gap;
+        }
+        session.last_healthy_frame = now;
+      }
       session.last_progress = now; session.last_frame = frame_ns;
     }
     if (paused) session.last_progress = now;
@@ -1273,14 +1364,62 @@ class Owner : public player::JobQueue::JobOwner {
       RateSnapshot(session, "rate-progress");
       session.next_rate_trace = now + kSecond;
     }
+    // Devel-only drift diagnostics: one snapshot per 10 s of playback.
+    if (!paused && now >= session.next_position_trace) {
+      const bool first = session.next_position_trace == 0;
+      session.next_position_trace = now + 10 * kSecond;
+      if (!first) RateSnapshot(session, "position");
+    }
     bool submit_eos = false;
     {
       Guard guard(mutex_);
       if (state_.generation() != session.generation) return;
       playing_ = session.playing;
       applied_rate_ = session.rate;
+      // AAC-only: decode-ahead starvation was observed on AAC livestreams.
+      // Opus keeps the timing from #89, so its seeking, buffering and rate
+      // behavior is unchanged; anchors stay unused for Opus.
+      if (!audio_.is_opus) {
+        if (paused != session.position_anchor_paused) {
+          // Pause freezes the presentation; resume re-anchors at the frozen
+          // position so the projection restarts from there at the new rate.
+          session.position_anchor_paused = paused;
+          session.applied_anchor_rate = session.rate;
+          session.position_anchor_us = current_;
+          session.position_anchor_time = now;
+        } else if (std::fabs(session.rate - session.applied_anchor_rate) > 0.0001) {
+          session.applied_anchor_rate = session.rate;
+          session.position_anchor_us = current_;
+          session.position_anchor_time = now;
+        }
+      }
       if (new_frame) {
-        current_ = std::max(current_, frame_ns / 1000 - session.plan.epoch_us);
+        const SbTime frame_position_us = frame_ns / 1000 - session.plan.epoch_us;
+        if (audio_.is_opus) {
+          // Opus keeps the pre-existing clock: every FRAMEREADY moves the
+          // media time.
+          current_ = std::max(current_, frame_position_us);
+        } else if (!paused) {
+          // AAC media time follows the projected presentation instead of
+          // decode-ahead FRAMEREADY reports. Trusting those made the webapp
+          // see the buffered end, stop appending and starve the session into
+          // the stall watchdog. A paused pipeline does not advance.
+          const SbTime expected_us = session.position_anchor_us +
+              static_cast<SbTime>((now - session.position_anchor_time) *
+                                  session.rate);
+          const SbTime bound = expected_us + kStarfishPositionSlackUs;
+          if (frame_position_us <= bound) {
+            // Real presentation evidence: trust it and re-anchor on it.
+            if (frame_position_us > current_) current_ = frame_position_us;
+            session.position_anchor_us = std::max(current_, frame_position_us);
+            session.position_anchor_time = now;
+          } else if (bound > current_) {
+            // Decode-ahead report: advance only to the projected bound.
+            current_ = bound;
+            session.position_anchor_us = bound;
+            session.position_anchor_time = now;
+          }
+        }
         have_frame_ = true; frame_time_ = now;
       }
       submit_eos = !session.replaying && state_.ReadyToSubmitEos();
@@ -1351,7 +1490,7 @@ class Owner : public player::JobQueue::JobOwner {
   }
 
   const SbPlayer player_;
-  const StarfishOpusConfig config_;
+  const SharedAudioSelection audio_;
   const SbMediaVideoCodec video_codec_;
   const int mode_;
   mutable std::mutex mutex_;
@@ -1430,8 +1569,8 @@ class Clock : public filter::MediaTimeProvider {
 class Components : public filter::PlayerComponents {
  public:
   Components(const Factory::CreationParameters& parameters,
-             const StarfishOpusConfig& config, int mode)
-      : owner_(parameters, config, mode), audio_(&owner_), video_(&owner_), clock_(&owner_) {}
+             const SharedAudioSelection& audio, int mode)
+      : owner_(parameters, audio, mode), audio_(&owner_), video_(&owner_), clock_(&owner_) {}
   filter::AudioRenderer* GetAudioRenderer() override { return &audio_; }
   filter::VideoRenderer* GetVideoRenderer() override { return &video_; }
   filter::MediaTimeProvider* GetMediaTimeProvider() override { return &clock_; }
@@ -1441,6 +1580,7 @@ class Components : public filter::PlayerComponents {
   Video video_;
   Clock clock_;
 };
+
 }  // namespace
 
 bool TryCreateStarfishAvComponents(
@@ -1460,8 +1600,10 @@ bool TryCreateStarfishAvComponents(
     return true;
   }
   const SbMediaVideoCodec video_codec = parameters.video_codec();
+  const bool opus_audio = parameters.audio_codec() == kSbMediaAudioCodecOpus;
+  const bool aac_audio = parameters.audio_codec() == kSbMediaAudioCodecAac;
   if (
-      parameters.audio_codec() != kSbMediaAudioCodecOpus ||
+      !(opus_audio || aac_audio) ||
       (video_codec != kSbMediaVideoCodecH264 &&
        !(mode >= 2 && (video_codec == kSbMediaVideoCodecVp9 ||
                       video_codec == kSbMediaVideoCodecAv1))) ||
@@ -1473,11 +1615,33 @@ bool TryCreateStarfishAvComponents(
   }
   const auto& audio = parameters.audio_sample_info();
   const auto& video = parameters.video_sample_info();
-  StarfishOpusConfig config;
-  if (!audio.mime || !std::strstr(audio.mime, "webm") ||
-      !StarfishOpusConfig::Parse(audio.audio_specific_config, audio.audio_specific_config_size,
-          audio.number_of_channels, audio.samples_per_second, &config) ||
-      !IsVideoConfigurationSupported(video_codec, video, mode)) {
+  SharedAudioSelection selection;
+  if (opus_audio) {
+    if (!audio.mime || !std::strstr(audio.mime, "webm") ||
+        !StarfishOpusConfig::Parse(audio.audio_specific_config,
+            audio.audio_specific_config_size, audio.number_of_channels,
+            audio.samples_per_second, &selection.opus)) {
+      Trace("existing backend (unsupported config)");
+      return false;
+    }
+  } else {
+    if (aac_shared_failures.load() >= kMaxAacSharedFailures) {
+      Trace("existing backend (AAC shared disabled after native failures) audio=%d video=%d",
+            parameters.audio_codec(), video_codec);
+      return false;
+    }
+    // MSE AAC arrives as audio/mp4 or audio/aac; the demuxer-supplied
+    // AudioSpecificConfig decides, the MIME only guards against exotic types.
+    if (!audio.mime ||
+        (!std::strstr(audio.mime, "mp4") && !std::strstr(audio.mime, "aac")) ||
+        !StarfishAacConfig::Parse(audio.audio_specific_config,
+            audio.audio_specific_config_size, &selection.aac)) {
+      Trace("existing backend (unsupported AAC config)");
+      return false;
+    }
+    selection.is_opus = false;
+  }
+  if (!IsVideoConfigurationSupported(video_codec, video, mode)) {
     Trace("existing backend (unsupported config)");
     return false;
   }
@@ -1486,10 +1650,11 @@ bool TryCreateStarfishAvComponents(
     *error_message = "shared Starfish A/V session already owned; refusing competing native session";
     return true;
   }
-  TraceEssential("selected shared %s+Opus backend mode=%d size=%dx%d bits=%u transfer=%d",
-        CodecName(video_codec), mode, video.frame_width, video.frame_height,
+  TraceEssential("selected shared %s+%s backend mode=%d size=%dx%d bits=%u transfer=%d",
+        CodecName(video_codec), selection.is_opus ? "Opus" : "AAC", mode,
+        video.frame_width, video.frame_height,
         video.color_metadata.bits_per_channel, video.color_metadata.transfer);
-  components->reset(new Components(parameters, config, mode));
+  components->reset(new Components(parameters, selection, mode));
   return true;
 }
 

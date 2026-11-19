@@ -5,18 +5,32 @@ This checks adapter behavior, not firmware flush semantics or physical A/V sync.
 """
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
 repo = Path(__file__).resolve().parent.parent
 source = (repo / 'cobalt-platform/webos/arm/starfish_av_components.cc').read_text()
 
+def sanitized(text):
+    """Blank string/char literals and comments, preserving offsets and lines.
+
+    Method extraction counts braces, so JSON braces inside string literals
+    must not be visible; offsets stay stable for slicing the original source.
+    """
+    def blank(match):
+        return ''.join('\n' if c == '\n' else ' ' for c in match.group(0))
+    pattern = r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"""
+    return re.sub(pattern, blank, text, flags=re.S)
+
+clean = sanitized(source)
+
 def method(signature):
     start = source.index(signature)
-    opening = source.index('{', start)
+    opening = clean.index('{', start)
     depth, end = 1, opening + 1
     while depth:
-        depth += (source[end] == '{') - (source[end] == '}')
+        depth += (clean[end] == '{') - (clean[end] == '}')
         end += 1
     return source[start:end]
 
@@ -44,6 +58,7 @@ fixture = r'''
 using namespace starboard::shared::webos;
 using SbTime = int64_t;
 constexpr SbTime kSecond = 1000000;
+constexpr SbTime kStarfishPositionSlackUs = POSITION_SLACK_US;
 SbTime now_us = 1000000;
 SbTime SbTimeGetMonotonicNow() { return now_us; }
 using Guard = std::lock_guard<std::mutex>;
@@ -68,7 +83,7 @@ using Stream = State::Stream;
 HDR_TRANSFER
 CODEC_NAME
 VIDEO_SUPPORTED
-std::string Base64(const std::array<uint8_t,19>&) { return "test-opus-header"; }
+std::string Base64(const uint8_t*, size_t) { return "test-opus-header"; }
 bool replay_enabled = true;
 bool RateReplayEnabled() { return replay_enabled; }
 template <typename... Args> std::string FormatString(const char* format, Args... args) {
@@ -132,11 +147,11 @@ struct StarfishMediaAPIs {
 SESSION
 struct Owner {
   mutable std::mutex mutex_;
-  StarfishOpusConfig config_ = [] {
-    StarfishOpusConfig c;
-    std::memcpy(c.header.data(), "OpusHead", 8);
-    c.header[8]=1; c.header[9]=2;
-    return c;
+  SharedAudioSelection audio_ = [] {
+    SharedAudioSelection audio;
+    std::memcpy(audio.opus.header.data(), "OpusHead", 8);
+    audio.opus.header[8]=1; audio.opus.header[9]=2;
+    return audio;
   }();
   State state_{{256, 1024*1024}, {kStarfishSeekHoldPackets, 32*1024*1024}};
   std::condition_variable wake_;
@@ -481,6 +496,62 @@ void TestLongGopDoesNotBlockRateChange() {
   assert(!bool(owner.pending_reload_));
 }
 
+void MakeAac(Owner& owner) {
+  owner.audio_.is_opus = false;
+  const uint8_t asc[] = {0x12, 0x10};  // AAC-LC 44.1 kHz stereo
+  assert(StarfishAacConfig::Parse(asc, sizeof(asc), &owner.audio_.aac));
+}
+
+void TestMediaTimeProjectionScopedToAac() {
+  // Opus keeps the pre-existing clock: every FRAMEREADY moves the media time,
+  // including reports past the presented position.
+  Owner opus; NativeSession os(opus.state_.generation()); Seed(opus, os);
+  assert(opus.current_ == 200000);
+  os.frame_ns = 1200000000;
+  opus.Step(os);
+  assert(opus.current_ == 1200000 && opus.error_.empty());
+
+  // AAC clamps decode-ahead reports to the real-time projection.
+  Owner aac; MakeAac(aac);
+  NativeSession as(aac.state_.generation()); Seed(aac, as);
+  assert(aac.current_ == 200000);
+  now_us += 200000; as.frame_ns = 400000000;
+  aac.Step(as);
+  assert(aac.current_ == 400000);
+  now_us += 100000; as.frame_ns = 1400000000;  // decode-ahead
+  aac.Step(as);
+  assert(aac.current_ == 1000000);  // elapsed time + slack
+  // A paused pipeline may still report frames but presents nothing: the
+  // media time freezes until presentation resumes.
+  aac.Pause(true); aac.Step(as);
+  const SbTime frozen = aac.current_;
+  now_us += 5 * kSecond; as.frame_ns += 5 * kSecond * 1000;
+  aac.Step(as);
+  assert(aac.current_ == frozen && aac.error_.empty());
+}
+
+void TestAacHealthyPlaybackTime() {
+  Owner aac; MakeAac(aac);
+  NativeSession as(aac.state_.generation()); Seed(aac, as);
+  assert(as.healthy_playback_us == 0);
+  int64_t frame = as.frame_ns.load();
+  for (int i = 0; i < 10; ++i) {
+    now_us += 16667; frame += 16666667;
+    as.frame_ns = frame; aac.Step(as);
+  }
+  assert(as.healthy_playback_us == 166670);
+  // A multi-second gap without frames (buffering) is not credited as healthy
+  // playback.
+  now_us += 2 * kSecond; frame += 2 * kSecond * 1000;
+  as.frame_ns = frame; aac.Step(as);
+  assert(as.healthy_playback_us == 166670);
+  // Paused time is not credited either.
+  aac.Pause(true); aac.Step(as);
+  now_us += 30 * kSecond; as.frame_ns += 30 * kSecond * 1000;
+  aac.Step(as);
+  assert(as.healthy_playback_us == 166670 && aac.error_.empty());
+}
+
 void TestRateAtDrainedEos() {
   Owner owner; NativeSession session(owner.state_.generation()); Seed(owner,session);
   owner.current_=9200000; session.rate=0.1; owner.Rate(1.75);
@@ -503,6 +574,8 @@ int main() {
   TestInitialRequestReplacementAndSeekCancellation();
   TestShortAudioPrerollSeek();
   TestLongGopDoesNotBlockRateChange();
+  TestMediaTimeProjectionScopedToAac();
+  TestAacHealthyPlaybackTime();
   TestRateAtDrainedEos();
   TestTransientRejectionAppliesInPlace();
   TestRejectedRateNeverClaimsSuccess();
@@ -546,7 +619,11 @@ snapshot = method('  void RateSnapshot(').replace(
     '    Guard guard(mutex_);',
     '    if (before_rate_hook && std::strcmp(reason, "before-rate")==0) before_rate_hook();\n'
     '    Guard guard(mutex_);', 1)
-fixture = (fixture.replace('\nSESSION\n', '\n' + session + '\n')
+slack = re.search(r'constexpr SbTime kStarfishPositionSlackUs = (\d+);',
+                  source)
+assert slack, 'kStarfishPositionSlackUs not found in starfish_av_components.cc'
+fixture = (fixture.replace('POSITION_SLACK_US', slack.group(1))
+           .replace('\nSESSION\n', '\n' + session + '\n')
            .replace('\nFEED\n', '\n' + method('  void Feed(') + '\n')
            .replace('\nSNAPSHOT\n', '\n' + snapshot + '\n')
            .replace('\nSTEP\n', '\n' + method('  bool UpdatePlaybackRate(') + '\n' +

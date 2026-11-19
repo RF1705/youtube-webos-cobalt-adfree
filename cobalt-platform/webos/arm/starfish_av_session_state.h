@@ -41,8 +41,53 @@ struct StarfishOpusConfig {
   }
 };
 
-struct StarfishOpusSessionPlan {
-  StarfishOpusConfig config;
+// AAC in the shared session: the MSE AudioSpecificConfig. Cobalt carries it
+// in a fixed 16-byte buffer zero-padded after the 2-byte core; only AAC-LC is
+// eligible, anything else (HE-AAC, explicit frequency) keeps the legacy
+// backend rather than risking a mis-decoded native session.
+struct StarfishAacConfig {
+  std::array<uint8_t, 2> asc{};
+  unsigned profile = 0;      // audio object type; 2 = AAC LC
+  unsigned sample_rate = 0;
+  unsigned channels = 0;
+
+  bool Matches(const StarfishAacConfig& other) const {
+    return asc == other.asc;
+  }
+
+  static bool Parse(const void* bytes, size_t size, StarfishAacConfig* result) {
+    static constexpr unsigned kRates[13] = {
+        96000, 88200, 64000, 48000, 44100, 32000, 24000,
+        22050, 16000, 12000, 11025, 8000, 7350};
+    // Cobalt stores the ASC in a 16-byte buffer padded with zeros.
+    constexpr size_t kCobaltAudioConfigSize = 16;
+    if (!bytes || !result || size < 2 || size > kCobaltAudioConfigSize)
+      return false;
+    const auto* data = static_cast<const uint8_t*>(bytes);
+    for (size_t i = 2; i < size; ++i) {
+      if (data[i] != 0) return false;  // extended ASC: unsupported here
+    }
+    const unsigned object_type = (data[0] >> 3) & 0x1F;
+    const unsigned rate_index = ((data[0] & 7) << 1) | (data[1] >> 7);
+    const unsigned channels = (data[1] >> 3) & 0xF;
+    if (object_type != 2 || rate_index >= 13 || channels == 0 || channels > 8)
+      return false;
+    result->asc = {data[0], data[1]};
+    result->profile = object_type;
+    result->sample_rate = kRates[rate_index];
+    result->channels = channels;
+    return true;
+  }
+};
+
+// One epoch and native target for both streams of a shared session. Opus
+// carries codec delay (|discard_samples|, patched into the fed OpusHead);
+// AAC has none, so its discard stays zero and its config only feeds the
+// native Load payload.
+struct StarfishSharedSessionPlan {
+  bool is_opus = true;
+  StarfishOpusConfig opus;   // valid when is_opus
+  StarfishAacConfig aac;     // valid when !is_opus
   int64_t epoch_us = 0;
   int64_t target_native_us = 0;
   unsigned discard_samples = 0;
@@ -67,7 +112,7 @@ struct StarfishOpusSessionPlan {
 inline bool PlanStarfishOpusSession(
     const StarfishOpusConfig& config, int64_t first_decoded_audio_us,
     int64_t first_video_us, int64_t target_us, bool starts_at_stream_origin,
-    StarfishOpusSessionPlan* result) {
+    StarfishSharedSessionPlan* result) {
   StarfishOpusConfig checked;
   if (!result || !StarfishOpusConfig::Parse(config.header.data(),
           config.header.size(), config.header[9], 48000, &checked)) return false;
@@ -93,8 +138,9 @@ inline bool PlanStarfishOpusSession(
       (starts_at_stream_origin && discard < checked.pre_skip_samples()))
     return false;
 
-  StarfishOpusSessionPlan plan;
-  plan.config = checked;
+  StarfishSharedSessionPlan plan;
+  plan.is_opus = true;
+  plan.opus = checked;
   plan.epoch_us = -std::min<int64_t>(0,
       std::min(first_decoded_audio_us, first_video_us));
   int64_t native_ns;
@@ -103,8 +149,38 @@ inline bool PlanStarfishOpusSession(
   if (!plan.ToNativeNanoseconds(first_video_us, &native_ns) ||
       !plan.ToNativeNanoseconds(first_decoded_audio_us, &native_ns)) return false;
   plan.discard_samples = discard;
-  plan.config.header[10] = discard & 255;
-  plan.config.header[11] = (discard >> 8) & 255;
+  plan.opus.header[10] = discard & 255;
+  plan.opus.header[11] = (discard >> 8) & 255;
+  *result = plan;
+  return true;
+}
+
+// AAC carries no codec delay and no pre-skip, so the shared plan is the epoch
+// shift alone. The first decoded audio sample IS the first packet's PTS: the
+// MSE demuxer already trims the encoder delay from the timestamps.
+inline bool PlanStarfishAacSession(
+    const StarfishAacConfig& config, int64_t first_decoded_audio_us,
+    int64_t first_video_us, int64_t target_us,
+    StarfishSharedSessionPlan* result) {
+  // profile is only set by a successful Parse.
+  if (!result || config.profile != 2) return false;
+  const int64_t limit = std::numeric_limits<int64_t>::max() / 1000;
+  if (first_decoded_audio_us < -limit || first_decoded_audio_us > limit ||
+      first_video_us < -limit || first_video_us > limit ||
+      target_us < 0 || target_us > limit ||
+      first_decoded_audio_us > target_us) return false;
+
+  StarfishSharedSessionPlan plan;
+  plan.is_opus = false;
+  plan.aac = config;
+  plan.epoch_us = -std::min<int64_t>(0,
+      std::min(first_decoded_audio_us, first_video_us));
+  int64_t native_ns;
+  if (!plan.ToNativeNanoseconds(target_us, &native_ns)) return false;
+  plan.target_native_us = native_ns / 1000;
+  if (!plan.ToNativeNanoseconds(first_video_us, &native_ns) ||
+      !plan.ToNativeNanoseconds(first_decoded_audio_us, &native_ns)) return false;
+  plan.discard_samples = 0;
   *result = plan;
   return true;
 }
@@ -379,7 +455,7 @@ constexpr int64_t kStarfishRateTransitionDeadlineUs = 5000000;
 inline bool PlanStarfishRateRestart(
     const StarfishOpusConfig& config, int64_t first_audio_us,
     int64_t first_video_us, int64_t position_us,
-    StarfishOpusSessionPlan* plan) {
+    StarfishSharedSessionPlan* plan) {
   const int64_t limit = std::numeric_limits<int64_t>::max() / 1000;
   if (!plan || first_audio_us > position_us ||
       first_audio_us < -limit || position_us < 0 || position_us > limit ||
@@ -387,6 +463,19 @@ inline bool PlanStarfishRateRestart(
   return position_us - first_video_us <= kStarfishSeekSnapWindowUs &&
       PlanStarfishOpusSession(config, first_audio_us, first_video_us,
                              position_us, false, plan);
+}
+
+inline bool PlanStarfishRateRestart(
+    const StarfishAacConfig& config, int64_t first_audio_us,
+    int64_t first_video_us, int64_t position_us,
+    StarfishSharedSessionPlan* plan) {
+  const int64_t limit = std::numeric_limits<int64_t>::max() / 1000;
+  if (!plan || first_audio_us > position_us ||
+      first_audio_us < -limit || position_us < 0 || position_us > limit ||
+      first_video_us < 0 || first_video_us > position_us) return false;
+  return position_us - first_video_us <= kStarfishSeekSnapWindowUs &&
+      PlanStarfishAacSession(config, first_audio_us, first_video_us,
+                             position_us, plan);
 }
 
 struct StarfishSeekRetargetResult {
