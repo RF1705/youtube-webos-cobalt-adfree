@@ -15,39 +15,13 @@ source = (repo / 'cobalt-platform/webos/arm/starfish_av_components.cc').read_tex
 def sanitized(text):
     """Blank string/char literals and comments, preserving offsets and lines.
 
-    Brace counting must not see JSON braces inside string literals (the load
-    payload is full of them), or a method can end at a literal's brace.
+    Method extraction counts braces, so JSON braces inside string literals
+    must not be visible; offsets stay stable for slicing the original source.
     """
-    out = list(text)
-    i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if c == '/' and i + 1 < n and text[i + 1] == '/':
-            while i < n and text[i] != '\n':
-                out[i] = ' '; i += 1
-        elif c == '/' and i + 1 < n and text[i + 1] == '*':
-            out[i] = out[i + 1] = ' '; i += 2
-            while i < n and not (text[i] == '*' and i + 1 < n and
-                                 text[i + 1] == '/'):
-                if text[i] != '\n': out[i] = ' '
-                i += 1
-            if i < n: out[i] = out[i + 1] = ' '; i += 2
-        elif c in '"\'':
-            quote = c
-            out[i] = ' '; i += 1
-            while i < n:
-                if text[i] == '\\':
-                    out[i] = ' '
-                    if i + 1 < n and text[i + 1] != '\n': out[i + 1] = ' '
-                    i += 2
-                    continue
-                if text[i] == quote:
-                    out[i] = ' '; i += 1; break
-                if text[i] != '\n': out[i] = ' '
-                i += 1
-        else:
-            i += 1
-    return ''.join(out)
+    def blank(match):
+        return ''.join('\n' if c == '\n' else ' ' for c in match.group(0))
+    pattern = r"""//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'"""
+    return re.sub(pattern, blank, text, flags=re.S)
 
 clean = sanitized(source)
 
