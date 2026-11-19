@@ -41,12 +41,10 @@ struct StarfishOpusConfig {
   }
 };
 
-// AAC in the shared session: the MSE AudioSpecificConfig. Cobalt's audio
-// config carries the ASC in a fixed 16-byte buffer with zero padding, so
-// Parse accepts sizes up to 16 bytes and requires everything after the
-// 2-byte core to be zero. Only the AAC-LC form feeds the shared session;
-// anything else (HE-AAC extension, explicit frequency) keeps the proven
-// legacy backend rather than risking a mis-decoded native session.
+// AAC in the shared session: the MSE AudioSpecificConfig. Cobalt carries it
+// in a fixed 16-byte buffer zero-padded after the 2-byte core; only AAC-LC is
+// eligible, anything else (HE-AAC, explicit frequency) keeps the legacy
+// backend rather than risking a mis-decoded native session.
 struct StarfishAacConfig {
   std::array<uint8_t, 2> asc{};
   unsigned profile = 0;      // audio object type; 2 = AAC LC
