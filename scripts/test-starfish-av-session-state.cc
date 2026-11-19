@@ -212,8 +212,12 @@ void TestAacConfigAndPlan() {
   assert(config.Matches(compact));  // padding must not change the config
 
   StarfishAacConfig different;
-  const uint8_t lc_mono[2] = {0x12, 0x10 | 0x80};  // mono vs stereo
+  // AAC-LC 44.1 kHz mono: channel configuration 1, unlike the stereo config
+  // above.
+  const uint8_t lc_mono[2] = {0x12, 0x08};
   assert(StarfishAacConfig::Parse(lc_mono, sizeof(lc_mono), &different));
+  assert(different.profile == 2 && different.sample_rate == 44100 &&
+         different.channels == 1);
   assert(!config.Matches(different));
 
   assert(!StarfishAacConfig::Parse(nullptr, 2, &config));
