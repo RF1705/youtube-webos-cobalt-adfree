@@ -298,7 +298,7 @@ void StarfishVideoDecoder::InitializePipeline(
       "\"video\":\"%s\"},\"esInfo\":{\"pauseAtDecodeTime\":true,"
       "\"seperatedPTS\":true,\"ptsToDecode\":%" PRId64
       ",\"videoWidth\":%d,"
-      "\"videoHeight\":%d,\"videoFpsValue\":60,\"videoFpsScale\":1},"
+      "\"videoHeight\":%d},"  // no fixed frame rate, see starfish_av_components.cc
       "\"format\":\"RAW\",\"provider\":\"Chrome\"},"
       "\"restartStreaming\":false,\"streamQualityInfo\":true,"
       "\"streamQualityInfoNonFlushable\":true,\"totalStreamSize\":256,"
