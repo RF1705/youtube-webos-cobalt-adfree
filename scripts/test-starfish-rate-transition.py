@@ -566,7 +566,20 @@ void TestRateAtDrainedEos() {
   assert(owner.state_.ended() && owner.error_.empty());
 }
 
+void TestLoadOmitsFixedFrameRate() {
+  // A hard-coded esInfo frame rate (60/1 for every stream) made webOS 11.2
+  // drop frames at every playback rate other than 1x. Let the sink derive it
+  // from the timestamps, as the stock starter does.
+  Owner owner; auto session=ColdSession(owner);
+  const std::string& payload=session->api->load_payload;
+  assert(payload.find("\"esInfo\":{")!=std::string::npos);
+  assert(payload.find("videoFpsValue")==std::string::npos);
+  assert(payload.find("videoFpsScale")==std::string::npos);
+  assert(payload.find("\"maxFrameRate\":60")!=std::string::npos);
+}
+
 int main() {
+  TestLoadOmitsFixedFrameRate();
   TestInPlaceRateChange();
   TestPauseKeepsAppliedRate();
   TestInitialRateBeforeFirstPlay();

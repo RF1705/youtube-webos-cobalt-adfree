@@ -934,8 +934,10 @@ class Owner : public player::JobQueue::JobOwner {
         "\"appId\":\"youtube.leanback.v4\",%s\"queryPosition\":false,"
         "\"externalStreamingInfo\":{\"contents\":{\"format\":\"RAW\",\"provider\":\"Chrome\","
         "\"codec\":{\"video\":\"%s\",\"audio\":\"%s\"},"
+        // No videoFpsValue/videoFpsScale: a fixed 60/1 made webOS 11.2 drop
+        // frames at every rate other than 1x; the stock starter sends none.
         "\"esInfo\":{\"pauseAtDecodeTime\":false,\"seperatedPTS\":true,\"ptsToDecode\":%lld,"
-        "\"videoWidth\":%d,\"videoHeight\":%d,\"videoFpsValue\":60,\"videoFpsScale\":1},"
+        "\"videoWidth\":%d,\"videoHeight\":%d},"
         "%s"
         "\"restartStreaming\":false,\"totalStreamSize\":256,\"bufferingCtrInfo\":{"
         "\"srcBufferLevelAudio\":{\"minimum\":1024,\"maximum\":1048576},"
